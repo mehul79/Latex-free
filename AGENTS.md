@@ -13,21 +13,22 @@ Guidance for AI coding agents working in this repo.
 - An **MCP server** so Claude, ChatGPT and other AI tools can read and edit the files in a user's account
 - An in-app **AI agent** for two domains: **Resume** and **Research report**
 
-Status: planning. There is no code yet.
+Status: initial application foundation. See README.md for working features, setup, checks, and deferred capabilities.
 
-## Proposed stack (defaults, not yet confirmed)
+## Selected stack
 
-| Area | Choice |
-|---|---|
-| Language | TypeScript (monorepo) |
-| Web app | Next.js, CodeMirror 6, PDF.js |
-| Auth | Google OAuth (Auth.js / Better Auth) |
-| Real-time collaboration | Yjs + Hocuspocus (WebSocket), with live cursors |
-| Database | Postgres (Prisma or Drizzle) |
-| File storage | S3-compatible storage (R2 / MinIO) |
-| Compile jobs | Redis queue → sandboxed Docker workers |
-| Compiler | TeX Live + `latexmk` (pdfLaTeX / XeLaTeX / LuaLaTeX) |
-| AI | Claude API by default |
+| Area                    | Choice                                                              |
+| ----------------------- | ------------------------------------------------------------------- |
+| Language                | TypeScript (monorepo)                                               |
+| Web app                 | Next.js, shadcn/ui, CodeMirror 6; PDF.js when compilation is added  |
+| Auth                    | Better Auth on Express, Google OAuth                                |
+| Real-time collaboration | Yjs + Hocuspocus (WebSocket), with live cursors                     |
+| API and database        | Express + TypeScript, Postgres + Prisma                             |
+| Project state           | Zustand, with browser persistence for the local workspace           |
+| File storage            | S3-compatible storage (R2 / MinIO)                                  |
+| Compile jobs            | Deferred; Express coordinates a separate sandboxed compiler service |
+| Compiler                | TeX Live + `latexmk` (pdfLaTeX / XeLaTeX / LuaLaTeX)                |
+| AI                      | Claude API by default                                               |
 
 ## Compiler rules
 
@@ -46,6 +47,7 @@ Edits go through Yjs, so collaborators see them live. Each tool must check the u
 ## AI agent (planned)
 
 The agent uses the same tools as the MCP server and shows every edit as a diff for the user to accept or reject.
+
 - **Resume:** templates, tailoring to a job description, checks that applicant tracking systems can read it, bullet rewrites, fitting the content to one page.
 - **Research report:** outlines, real citations from Crossref, arXiv and Semantic Scholar converted to BibTeX, tables and figures, fixing compile errors.
 
