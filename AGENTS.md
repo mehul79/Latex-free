@@ -1,78 +1,102 @@
-# AGENTS.md
+# Agent guide
 
-Guidance for AI coding agents working in this repo.
+Latex-free is a free, open LaTeX workspace inspired by Overleaf. Free collaboration is a product goal; do not promise unlimited operational capacity. Use [README.md](README.md) for setup, environment variables, detailed commands, and verified feature scope. Read any directory-specific `AGENTS.md` before editing there.
 
-## Project
+## Working preferences
 
-**Latex-free** is a free, open alternative to Overleaf:
+- Work sequentially on one feature at a time. Use one executor by default; do not spawn extra agents unless the user requests parallel work.
+- Keep changes small and reviewable. Use the existing checkout; cloud tasks are already isolated and do not need another worktree.
+- Run focused checks appropriate to the changed behavior. Avoid broad or repeated integration runs unless a failure or shared change justifies them. Documentation-only changes need formatting and diff checks, not application tests.
+- Hydration work is deferred at the user's request. Do not resume it without a new instruction.
+- AI assistance is paused. Preserve unfinished prototypes without activating or developing them.
+- Where model selection is available, use GPT-6.1 Sol (`gpt-6.1-sol`): high reasoning for planning, medium or low for implementation. Simple documentation edits do not need extra agents or extra-high reasoning.
 
-- Sign in with Google
-- Create and manage multiple LaTeX projects
-- Collaborate in real time with an unlimited number of people
-- An Overleaf-style editor with a LaTeX compiler and PDF preview
-- An **MCP server** so Claude, ChatGPT and other AI tools can read and edit the files in a user's account
-- An in-app **AI agent** for two domains: **Resume** and **Research report**
+## Current architecture
 
-Status: local and account workspaces, project archives and assets, account sharing roles and saved text history, and an optional sandboxed compiler. See README.md for working features, setup, checks, and deferred capabilities.
+| Area                   | Implementation                                                                                       |
+| ---------------------- | ---------------------------------------------------------------------------------------------------- |
+| Web                    | Next.js, TypeScript, shadcn/ui, CodeMirror 6, PDF.js                                                 |
+| API and authentication | Express, Better Auth with Google OAuth                                                               |
+| Database               | PostgreSQL with Prisma                                                                               |
+| Workspace state        | Zustand; browser-persisted local projects and separate account state                                 |
+| Collaboration          | Yjs + Hocuspocus, owned by one API process                                                           |
+| File storage           | Bounded text and base64-encoded binary assets in PostgreSQL                                          |
+| Compilation            | Synchronous API request to a separate trusted Node worker, which runs TeX Live + `latexmk` in Docker |
 
-## Selected stack
+There is no S3/object-storage backend, Redis job queue, or horizontally distributed collaboration authority. Do not assume those services exist.
 
-| Area                    | Choice                                                    |
-| ----------------------- | --------------------------------------------------------- |
-| Language                | TypeScript (monorepo)                                     |
-| Web app                 | Next.js, shadcn/ui, CodeMirror 6; PDF.js                  |
-| Auth                    | Better Auth on Express, Google OAuth                      |
-| Real-time collaboration | Yjs + Hocuspocus (WebSocket), with live cursors           |
-| API and database        | Express + TypeScript, Postgres + Prisma                   |
-| Project state           | Zustand, with browser persistence for the local workspace |
-| File storage            | S3-compatible storage (R2 / MinIO)                        |
-| Compile jobs            | Express coordinates a separate sandboxed compiler worker  |
-| Compiler                | TeX Live + `latexmk` (pdfLaTeX / XeLaTeX / LuaLaTeX)      |
-| AI                      | Claude API by default                                     |
+```text
+apps/web/src/app          Next.js routes
+apps/web/src/components   Editor, dashboard, sharing, history, comments, UI
+apps/web/src/stores       Workspace, comments, tokens, project details
+apps/web/src/hooks        Collaboration lifecycle
+apps/api/src              Express routes, auth, project/document services, collaboration
+apps/api/src/mcp          MCP server, token authorization, compile integration
+apps/api/src/comments     Discussions and optional anchors
+apps/api/prisma           Database schema and migrations
+apps/compiler/src         Trusted worker, sandbox orchestration, diagnostics
+packages/shared/src       Validation, API types, templates
+tests                     Browser checks
+```
 
-## Compiler rules
+The paused prototypes are under `apps/api/src/ai`, `apps/api/src/resume`, and `apps/api/src/research`; their presence does not make AI an active feature.
 
-- Self-host TeX Live in Docker. Do not depend on public compile APIs.
-- Sandbox every compile: no network, no `--shell-escape`, and limits on CPU, memory and time.
-- Return the PDF and parsed log errors. SyncTeX is a later milestone.
-- Run the trusted Node worker on the host; only TeX runs inside the restricted container. Never expose the Docker socket to the web/API process.
-- Keep local anonymous compilation opt-in with `ENABLE_LOCAL_COMPILE=true`; authenticate worker requests with matching API/worker tokens.
-- Alternatives considered: Tectonic, SwiftLaTeX / BusyTeX (WebAssembly, possible offline mode later), and Overleaf Community Edition (AGPL, not forked).
+## Implemented behavior
 
-## MCP server (planned)
+- Dashboard grid/list views, search, sorting, stars, rename/delete, and blank/article/resume/report templates.
+- CodeMirror editing, nested file trees, rename/move/delete, binary assets, outline, source downloads, and ZIP/JSON import/export.
+- Browser-local workspace independent of the API; separate authenticated account workspace with offline drafts, reconnect synchronization, and recovery controls.
+- Live account collaboration and cursors; owner/editor/viewer sharing with existing Google-linked accounts and live access revocation.
+- Immutable saved text revisions, previews/downloads, and restore as a new version at the current path. Deleted files cannot be recovered through history.
+- Text-file discussions, replies, resolve/reopen, moderation, and viewer read-only access. The UI creates file discussions and requires manual **Refresh comments** for other members' replies; optional selection anchors exist in the API.
+- Optional compilation with pdfLaTeX, XeLaTeX, or LuaLaTeX; PDF.js preview, parsed logs, and downloadable SyncTeX artifacts. Interactive SyncTeX navigation is deferred.
+- Remote MCP with ten tools: `list_projects`, `list_files`, `read_file`, `create_file`, `edit_file`, `write_file`, `delete_file`, `compile`, `get_compile_errors`, and `share_project`. Account settings provide personal access tokens with permission scopes, project restrictions, expiry, and revocation. Versioned MCP edits reach live collaborators.
 
-A remote MCP server, authenticated with a personal access token first and OAuth 2.1 later. Tools:
-`list_projects`, `list_files`, `read_file`, `create_file`, `edit_file` (find-and-replace),
-`write_file`, `delete_file`, `compile`, `get_compile_errors`, `share_project`.
-Edits go through Yjs, so collaborators see them live. Each tool must check the user's role on the project.
+Dashboard thumbnails are template illustrations; editor previews render compiled PDFs.
 
-## AI agent (paused)
+## State and mutation rules
 
-AI assistance is paused at the user’s request. Preserve the unfinished prototypes without activating or developing them.
+- Zustand owns workspace/project state; Better Auth owns sessions. Keep transient dialogs and forms in React state. Never leak account projects or content into local-workspace persistence. Signing in does not upload local projects.
+- Route account text mutations, including REST/MCP edits and history restores, through `DocumentService` and its attached collaboration authority. Do not introduce independent Prisma and Yjs write paths that can disagree about document content.
+- Preserve the shared per-project mutex in `project-mutex.ts` and transactional project-row locking for authorization. Membership writers and document writers must serialize through the project lock and recheck current roles/revocation inside that lock; connection-time checks alone are insufficient.
+- Keep optimistic versions on REST/MCP writes and reject conflicts instead of overwriting newer content. Preserve immutable history snapshots.
+- Show **Saved** only after the persistence-barrier acknowledgment confirms the relevant edits reached the database. A Yjs **synced** event alone does not establish durability.
+- Preserve offline/recovery drafts until acknowledged or explicitly discarded. Do not add an offline REST fallback around the collaborative write path.
+- The current collaboration authority requires one API process. Multiple API replicas need an explicit coordination design before deployment.
 
-The agent uses the same tools as the MCP server and shows every edit as a diff for the user to accept or reject.
+## Compiler and security rules
 
-- **Resume:** templates, tailoring to a job description, checks that applicant tracking systems can read it, bullet rewrites, fitting the content to one page.
-- **Research report:** outlines, real citations from Crossref, arXiv and Semantic Scholar converted to BibTeX, tables and figures, fixing compile errors.
+- Self-host TeX Live; do not depend on public compile APIs. Keep the trusted Node worker separate from the API. Never expose the Docker socket to the API or browser.
+- Run each TeX job in a fresh container with no network, non-root user, read-only root filesystem, dropped capabilities, no new privileges, and CPU, memory, process, time, and output limits.
+- Keep `latexmk -norc`, disabled shell escape, restricted file access, and engine-specific safety flags. Uploaded project files must not supply executable compiler configuration.
+- Authenticate API-to-worker requests with matching secret tokens. Keep anonymous local compilation opt-in through `ENABLE_LOCAL_COMPILE=true`; it is disabled by default.
+- Preserve source/path/count/byte limits and artifact bounds across uploads, archives, API requests, and worker responses. Current import bounds include 500 files, 20 MiB unpacked total, 1 MB per text file, and 5 MiB per binary asset.
+- Never print or commit secrets. Keep actual credentials in ignored `.env`/`.env.local` files and update the relevant `.env.example` when adding configuration.
 
-## Roadmap
+## Development and verification
 
-1. MVP: auth, dashboard, editor, file tree, compile, PDF preview, templates
-2. Collaboration: live editing, sharing roles (owner / editor / viewer), comments, history
-3. MCP server
-4. AI agent
-5. Later: track changes, Git sync, SyncTeX, offline WASM compile
+Use Node.js 22.12+ (24 recommended), npm workspaces, and Docker Compose for local PostgreSQL. Normal commands from the repository root:
 
-## Open questions
+```bash
+npm ci
+npm run db:generate
+npm run build -w @latex-free/shared
+npm run dev -w @latex-free/web  # Frontend/local workspace only
+docker compose up -d postgres
+npm run db:migrate
+npm run dev                    # Account API and web
+npm run dev:compiler           # Optional configured worker
+```
 
-Who pays for AI (bring-your-own-key, platform limits, or both) · hosting and budget · storage and compile limits · license · MCP sign-in (tokens or OAuth first) · MVP scope.
+README documents required environment files, compiler image/token setup, and checks: `npm run lint`, `npm run typecheck`, `npm test`, `npm run build`, `npm run test:integration`, and `npm run test:e2e`. Select the smallest relevant checks; these are available commands, not a requirement to run every suite on every change. Database integration checks require a dedicated migrated database ending in `_test`. Account browser checks use signed Better Auth fixtures; they do not verify the full Google redirect/consent flow.
 
-## Conventions
+Use feature branches and PR merges. Never commit or push directly to `main` unless the user explicitly overrides this rule. Do not commit or push unless requested.
 
-- Develop on the assigned feature branch. Never push to `main` directly.
-- Keep changes small. Run lint, typecheck and tests before committing.
-- Never commit secrets. Use `.env` (gitignored) and keep `.env.example` up to date.
+## Deferred scope and limitations
 
-## Model preference
-
-Where model selection is available, use GPT-6.1 Sol (`gpt-6.1-sol`) with high reasoning for planning, and medium or low reasoning for implementation.
+- The full Google OAuth redirect/consent flow remains unverified; signed-session fixture tests do not cover it. Production deployment and a public preview are not configured.
+- Object storage, durable artifact storage, automated backups, queueing, capacity planning, and multi-process collaboration need future deployment work. Project listing currently loads full content; larger accounts need pagination/on-demand loading.
+- Deleted-file recovery, invitation/notification emails, track changes, Git sync, interactive SyncTeX, and offline WASM compilation are deferred.
+- MCP currently uses personal access tokens; OAuth 2.1 sign-in is future work.
+- Kitchen plugins/components are not integrated. Verify their API and license before any use; do not claim their licensing or attribution. Existing shadcn/ui components include their upstream MIT license.
+- AI prototypes remain paused and unwired. Do not turn this deferred list into implementation work without the user's direction.
