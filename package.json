@@ -1,0 +1,33 @@
+{
+  "name": "latex-free",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "npm run build -w @latex-free/shared && concurrently -k -n api,web 'npm run dev -w @latex-free/api' 'npm run dev -w @latex-free/web'",
+    "build": "npm run build -w @latex-free/shared && npm run build -w @latex-free/api && npm run build -w @latex-free/compiler && npm run build -w @latex-free/web",
+    "typecheck": "npm run build -w @latex-free/shared && npm run typecheck --workspaces --if-present",
+    "lint": "eslint apps packages --max-warnings=0",
+    "test": "npm run build -w @latex-free/shared && vitest run",
+    "db:generate": "npm run db:generate -w @latex-free/api",
+    "db:migrate": "npm run db:migrate -w @latex-free/api",
+    "test:e2e": "playwright test",
+    "test:integration": "npm run build -w @latex-free/shared && npm run test:integration -w @latex-free/api",
+    "dev:compiler": "npm run dev -w @latex-free/compiler"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.56.0",
+    "concurrently": "^9.2.1",
+    "eslint": "^9.39.0",
+    "eslint-config-next": "16.4.3",
+    "prettier": "^3.9.10",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.46.0",
+    "vitest": "^3.2.4"
+  }
+}
