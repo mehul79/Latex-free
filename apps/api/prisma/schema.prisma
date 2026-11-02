@@ -16,6 +16,11 @@ model User {
   sessions      Session[]
   accounts      Account[]
   memberships   Membership[]
+  revisions     FileRevision[]
+  accessTokens  AccessToken[]
+  discussions   CommentThread[] @relation("ThreadCreator")
+  resolutions   CommentThread[] @relation("ThreadResolver")
+  comments      Comment[]
 }
 model Session {
   id        String   @id
@@ -70,6 +75,7 @@ model Project {
   updatedAt DateTime     @updatedAt
   members   Membership[]
   files     File[]
+  discussions CommentThread[]
 }
 model Membership {
   userId    String
@@ -84,8 +90,72 @@ model File {
   id        String   @id @default(cuid())
   path      String
   content   String   @db.Text
+  encoding  String   @default("utf8")
+  mimeType  String?
   version   Int      @default(0)
+  yState    Bytes?
   projectId String
   project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  revisions FileRevision[]
+  discussions CommentThread[]
   @@unique([projectId, path])
+}
+
+model FileRevision {
+  id        String @id @default(cuid())
+  fileId    String
+  file      File @relation(fields: [fileId], references: [id], onDelete: Cascade)
+  authorId  String?
+  author    User? @relation(fields: [authorId], references: [id], onDelete: SetNull)
+  version   Int
+  path      String
+  content   String @db.Text
+  reason    String
+  createdAt DateTime @default(now())
+  @@unique([fileId, version])
+  @@index([fileId, createdAt])
+}
+
+model AccessToken {
+  id         String @id @default(cuid())
+  userId     String
+  user       User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  label      String
+  tokenHash  String @unique
+  scopes     String[]
+  projectIds String[]
+  expiresAt  DateTime
+  revokedAt  DateTime?
+  createdAt  DateTime @default(now())
+  @@index([userId])
+}
+
+model CommentThread {
+  id           String @id @default(cuid())
+  projectId    String
+  project      Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  fileId       String
+  file         File @relation(fields: [fileId], references: [id], onDelete: Cascade)
+  createdById  String?
+  createdBy    User? @relation("ThreadCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  resolvedById String?
+  resolvedBy   User? @relation("ThreadResolver", fields: [resolvedById], references: [id], onDelete: SetNull)
+  resolvedAt   DateTime?
+  anchor       Json?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  comments     Comment[]
+  @@index([projectId, fileId, createdAt, id])
+}
+
+model Comment {
+  id        String @id @default(cuid())
+  threadId  String
+  thread    CommentThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  authorId  String?
+  author    User? @relation(fields: [authorId], references: [id], onDelete: SetNull)
+  body      String @db.Text
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@index([threadId, createdAt, id])
 }

@@ -137,7 +137,12 @@ describe("authenticated projects against Postgres and Better Auth", () => {
     const saved = await save("First save");
     expect(saved.status).toBe(200);
     expect(saved.body.file.version).toBe(1);
-    expect((await save("Stale overwrite")).status).toBe(409);
+    const stale = await save("Stale overwrite");
+    expect(stale.status).toBe(409);
+    expect(stale.body.file).toMatchObject({
+      content: "First save",
+      version: 1,
+    });
     expect(
       (await db.file.findUniqueOrThrow({ where: { id: file.id } })).content,
     ).toBe("First save");
@@ -153,6 +158,125 @@ describe("authenticated projects against Postgres and Better Auth", () => {
     expect((await add("../secret.tex")).status).toBe(400);
     expect((await add("notes.tex")).status).toBe(201);
     expect((await add("notes.tex")).status).toBe(409);
+  });
+  it("imports binary assets atomically and returns viewer roles", async () => {
+    const result = await request(app)
+      .post("/api/projects/import")
+      .set("Cookie", ownerCookie)
+      .set("Origin", config.WEB_ORIGIN)
+      .send({
+        name: "Imported",
+        files: [
+          { path: "main.tex", content: "hello" },
+          {
+            path: "images/pixel.png",
+            content: "AA==",
+            encoding: "base64",
+            mimeType: "image/png",
+          },
+        ],
+      });
+    expect(result.status).toBe(201);
+    projectIds.push(result.body.project.id);
+    expect(result.body.project.role).toBe("OWNER");
+    expect(
+      result.body.project.files.find((f: { path: string }) =>
+        f.path.endsWith(".png"),
+      ),
+    ).toMatchObject({
+      encoding: "base64",
+      mimeType: "image/png",
+      content: "AA==",
+    });
+    const invalid = await request(app)
+      .post("/api/projects/import")
+      .set("Cookie", ownerCookie)
+      .set("Origin", config.WEB_ORIGIN)
+      .send({ name: "Invalid", files: [{ path: "a" }, { path: "a/c" }] });
+    expect(invalid.status).toBe(400);
+    const viewer = await request(app)
+      .get("/api/projects")
+      .set("Cookie", viewerCookie);
+    expect(viewer.body.projects[0].role).toBe("VIEWER");
+  });
+  it("renames and deletes with optimistic versions, including conflict recovery", async () => {
+    const projectId = projectIds[1];
+    const file = await db.file.findFirstOrThrow({
+      where: { projectId, path: "main.tex" },
+    });
+    const route = `/api/projects/${projectId}/files/${file.id}`;
+    const rename = await request(app)
+      .patch(route)
+      .set("Cookie", ownerCookie)
+      .set("Origin", config.WEB_ORIGIN)
+      .send({ path: "chapters/start.tex", version: 0 });
+    expect(rename.status).toBe(200);
+    expect(rename.body.file).toMatchObject({
+      path: "chapters/start.tex",
+      version: 1,
+    });
+    const stale = await request(app)
+      .delete(`${route}?version=0`)
+      .set("Cookie", ownerCookie)
+      .set("Origin", config.WEB_ORIGIN);
+    expect(stale.status).toBe(409);
+    expect(stale.body.file).toMatchObject({
+      path: "chapters/start.tex",
+      version: 1,
+    });
+    expect(
+      (
+        await request(app)
+          .delete(route)
+          .set("Cookie", ownerCookie)
+          .set("Origin", config.WEB_ORIGIN)
+      ).status,
+    ).toBe(400);
+    for (const cookie of [viewerCookie, otherCookie])
+      expect(
+        (
+          await request(app)
+            .patch(route)
+            .set("Cookie", cookie)
+            .set("Origin", config.WEB_ORIGIN)
+            .send({ path: "stolen.tex", version: 1 })
+        ).status,
+      ).toBe(404);
+    expect(
+      (
+        await request(app)
+          .delete(`${route}?version=1`)
+          .set("Cookie", ownerCookie)
+          .set("Origin", config.WEB_ORIGIN)
+      ).status,
+    ).toBe(204);
+  });
+  it("rejects parent collisions even when file creations race", async () => {
+    const route = `/api/projects/${projectIds[1]}/files`;
+    const responses = await Promise.all(
+      ["collision", "collision/nested.tex"].map((path) =>
+        request(app)
+          .post(route)
+          .set("Cookie", ownerCookie)
+          .set("Origin", config.WEB_ORIGIN)
+          .send({ path }),
+      ),
+    );
+    expect(responses.map((response) => response.status).sort()).toEqual([
+      201, 409,
+    ]);
+    const binary = await db.file.findFirstOrThrow({
+      where: { projectId: projectIds[1], encoding: "base64" },
+    });
+    expect(
+      (
+        await request(app)
+          .put(`${route}/${binary.id}`)
+          .set("Cookie", ownerCookie)
+          .set("Origin", config.WEB_ORIGIN)
+          .send({ content: "corrupted", version: 0 })
+      ).status,
+    ).toBe(400);
   });
   it("lets the owner delete a project and removes its files", async () => {
     const id = projectIds[0];

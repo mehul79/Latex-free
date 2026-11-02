@@ -13,7 +13,10 @@
     "test:integration": "vitest run --config vitest.integration.config.ts"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^1.3.0",
+    "@hocuspocus/server": "^4.8.0",
     "@latex-free/shared": "*",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "@prisma/adapter-pg": "^7.10.1",
     "@prisma/client": "^7.10.1",
     "better-auth": "1.7.15",
@@ -21,7 +24,10 @@
     "dotenv": "^17.4.2",
     "express": "^5.1.0",
     "express-rate-limit": "^8.2.1",
+    "fast-xml-parser": "^5.11.2",
     "helmet": "^8.1.0",
+    "ws": "^8.22.1",
+    "yjs": "^13.6.33",
     "zod": "^4.1.12"
   },
   "devDependencies": {
@@ -29,6 +35,7 @@
     "@types/express": "^5.0.3",
     "@types/node": "^24.10.0",
     "@types/supertest": "^6.0.3",
+    "@types/ws": "^8.18.2",
     "prisma": "^7.10.1",
     "supertest": "^7.1.4",
     "tsx": "^4.20.6"

@@ -1,16 +1,15 @@
 "use client";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import Link from "next/link";
+import Image from "next/image";
 import { StreamLanguage } from "@codemirror/language";
 import { EditorView } from "@codemirror/view";
 import { stex } from "@codemirror/legacy-modes/mode/stex";
 import {
   ArrowLeft,
-  ArrowUpRight,
   Check,
   ChevronDown,
-  CircleHelp,
   Code2,
   Download,
   FilePlus2,
@@ -22,12 +21,15 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Save,
-  Sparkles,
   WrapText,
+  Upload,
 } from "lucide-react";
 import { toast } from "sonner";
-import { createFileSchema } from "@latex-free/shared";
+import { createFileSchema, type ProjectFile } from "@latex-free/shared";
 import { useWorkspace } from "@/stores/workspace";
+import { useCollaboration } from "@/hooks/use-collaboration";
+import { CollaborativeEditor } from "@/components/collaborative-editor";
+import { RecoveredDrafts } from "@/components/recovered-drafts";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -50,6 +52,12 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { Skeleton } from "@/components/ui/skeleton";
+import { ProjectSharing } from "@/components/project-sharing";
+import { FileComments } from "@/components/file-comments";
+import { FileHistory } from "@/components/file-history";
+import { ProjectFiles } from "@/components/project-files";
+import { CompilePanel } from "@/components/compile-panel";
+import { exportProjectZip, exportProjectJson } from "@/lib/archive";
 const CodeMirror = dynamic(() => import("@uiw/react-codemirror"), {
   ssr: false,
   loading: () => (
@@ -58,13 +66,26 @@ const CodeMirror = dynamic(() => import("@uiw/react-codemirror"), {
     </div>
   ),
 });
-function download(name: string, content: string, type: string) {
-  const url = URL.createObjectURL(new Blob([content], { type }));
+function download(name: string, content: string | Uint8Array, type: string) {
+  const bytes =
+    typeof content === "string" ? content : new Uint8Array(content).buffer;
+  const url = URL.createObjectURL(new Blob([bytes], { type }));
   const a = document.createElement("a");
   a.href = url;
   a.download = name;
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+function downloadFile(file: ProjectFile) {
+  const content =
+    file.encoding === "base64"
+      ? Uint8Array.from(atob(file.content), (c) => c.charCodeAt(0))
+      : file.content;
+  download(
+    file.path.split("/").pop()!,
+    content,
+    file.mimeType ?? "application/octet-stream",
+  );
 }
 export function EditorWorkspace({ projectId }: { projectId: string }) {
   const s = useWorkspace();
@@ -78,22 +99,59 @@ export function EditorWorkspace({ projectId }: { projectId: string }) {
   const [sidebar, setSidebar] = useState(true);
   const [layout, setLayout] = useState<"source" | "split">("split");
   const [wrap, setWrap] = useState(true);
-  const [compilerInfo, setCompilerInfo] = useState(false);
+  const [mobilePreview, setMobilePreview] = useState(false);
+  const [action, setAction] = useState<{
+    file: ProjectFile;
+    kind: "rename" | "delete";
+  } | null>(null);
+  const [actionPath, setActionPath] = useState("");
+  const [actionError, setActionError] = useState("");
+  const upload = useRef<HTMLInputElement>(null);
+  const editorView = useRef<EditorView | null>(null);
+  const pendingLine = useRef<number | null>(null);
+  function jumpToLine(view: EditorView, line: number) {
+    const pos = view.state.doc.line(
+      Math.max(1, Math.min(line, view.state.doc.lines)),
+    ).from;
+    view.dispatch({
+      selection: { anchor: pos },
+      effects: EditorView.scrollIntoView(pos, { y: "center" }),
+    });
+    view.focus();
+  }
+  const collaborative =
+    s.mode === "account" && !!file && file.encoding !== "base64";
+  const collaboration = useCollaboration(
+    s.mode === "account" ? s.accountId : null,
+    projectId,
+    collaborative ? file?.id : undefined,
+  );
+  const readOnly =
+    project?.role === "VIEWER" ||
+    Boolean(
+      collaborative && collaboration.session && collaboration.state.readOnly,
+    );
+  const hasConflict =
+    file && Object.prototype.hasOwnProperty.call(s.conflicts, file.id);
+  const startAutosave = s.startAutosave;
+  useEffect(() => startAutosave(), [startAutosave]);
   const hasDirty = Boolean(project?.files.some((f) => s.dirty[f.id]));
   const outline = useMemo(
     () =>
-      file?.content.split("\n").flatMap((line, i) => {
-        const match = line.match(
-          /\\(chapter|section|subsection)\*?\{([^}]+)\}/,
-        );
-        return match
-          ? [{ title: match[2], line: i + 1, sub: match[1] === "subsection" }]
-          : [];
-      }) ?? [],
-    [file?.content],
+      (file?.encoding === "base64" ? undefined : file?.content)
+        ?.split("\n")
+        .flatMap((line, i) => {
+          const match = line.match(
+            /\\(chapter|section|subsection)\*?\{([^}]+)\}/,
+          );
+          return match
+            ? [{ title: match[2], line: i + 1, sub: match[1] === "subsection" }]
+            : [];
+        }) ?? [],
+    [file?.content, file?.encoding],
   );
   const save = useCallback(async () => {
-    if (!project) return;
+    if (!project || readOnly) return;
     try {
       for (const f of project.files) await s.saveFile(projectId, f.id);
       toast.success(
@@ -102,7 +160,7 @@ export function EditorWorkspace({ projectId }: { projectId: string }) {
     } catch (error) {
       toast.error((error as Error).message);
     }
-  }, [project, projectId, s]);
+  }, [project, projectId, s, readOnly]);
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key === "s") {
@@ -123,8 +181,69 @@ export function EditorWorkspace({ projectId }: { projectId: string }) {
       window.removeEventListener("beforeunload", unload);
     };
   }, [save, hasDirty]);
+  async function uploadFiles(files: FileList | null) {
+    if (!files || readOnly) return;
+    setBusy(true);
+    let count = 0;
+    try {
+      for (const item of Array.from(files)) {
+        const text =
+          /\.(tex|bib|sty|cls|txt|md|csv|json|yaml|yml|bst|cfg|def|clo|fd|ltx)$/i.test(
+            item.name,
+          ) || item.type.startsWith("text/");
+        if (item.size > (text ? 1_000_000 : 5 * 1024 * 1024))
+          throw new Error(
+            `${item.name} exceeds the ${text ? "1 MB text" : "5 MiB asset"} limit.`,
+          );
+        const bytes = new Uint8Array(await item.arrayBuffer());
+        let content: string;
+        if (text)
+          content = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+        else {
+          let binary = "";
+          for (const byte of bytes) binary += String.fromCharCode(byte);
+          content = btoa(binary);
+        }
+        const id = await s.addAsset(
+          projectId,
+          item.name,
+          content,
+          text ? "utf8" : "base64",
+          item.type || null,
+        );
+        setSelected(id);
+        count++;
+      }
+      toast.success(`${count} ${count === 1 ? "file" : "files"} uploaded`);
+    } catch (error) {
+      toast.error(
+        `${count ? `${count} uploaded. ` : ""}${(error as Error).message}`,
+      );
+    } finally {
+      setBusy(false);
+      if (upload.current) upload.current.value = "";
+    }
+  }
+  async function submitFileAction(e: React.FormEvent) {
+    e.preventDefault();
+    if (!action || readOnly) return;
+    setBusy(true);
+    setActionError("");
+    try {
+      if (action.kind === "delete")
+        await s.deleteFile(projectId, action.file.id);
+      else await s.renameFile(projectId, action.file.id, actionPath);
+      toast.success(action.kind === "delete" ? "File deleted" : "File moved");
+      setAction(null);
+    } catch (error) {
+      setActionError((error as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
   async function addFile(e: React.FormEvent) {
     e.preventDefault();
+    if (readOnly) return;
     const input = createFileSchema.safeParse({ path });
     if (!input.success) {
       toast.error(
@@ -173,7 +292,7 @@ export function EditorWorkspace({ projectId }: { projectId: string }) {
       </main>
     );
   return (
-    <div className="editor-shell">
+    <div className={cn("editor-shell", mobilePreview && "mobile-preview-on")}>
       <header className="editor-header">
         <div className="editor-title">
           <Tooltip>
@@ -202,13 +321,57 @@ export function EditorWorkspace({ projectId }: { projectId: string }) {
           <span className="breadcrumb-slash">/</span>
           <h1 title={project.name}>{project.name}</h1>
           <span className="editor-local-label">
-            {s.mode === "local" ? "Local" : "Account"}
+            {s.mode === "local"
+              ? "Local"
+              : project.role === "VIEWER"
+                ? "Viewer"
+                : project.role === "EDITOR"
+                  ? "Editor"
+                  : "Owner"}
           </span>
         </div>
         <div className="editor-header-actions">
-          <span className="save-status">
-            {hasDirty ? (
-              "Unsaved changes"
+          <ProjectSharing
+            key={`${s.accountId}:${project.id}`}
+            project={project}
+          />
+          {file && (
+            <FileHistory
+              key={`${s.accountId}:${file.id}`}
+              projectId={project.id}
+              file={file}
+              readOnly={readOnly}
+            />
+          )}
+          {file && (
+            <FileComments
+              key={`comments:${s.accountId}:${file.id}`}
+              projectId={project.id}
+              file={file}
+              readOnly={readOnly}
+              owner={project.role === "OWNER"}
+            />
+          )}
+          <span className="save-status" aria-live="polite">
+            {collaborative &&
+            (!collaboration.state.connected ||
+              !collaboration.state.synchronized ||
+              !collaboration.state.durable) ? (
+              !collaboration.state.connected ? (
+                "Offline · draft retained"
+              ) : !collaboration.state.synchronized ? (
+                "Connected · synchronizing…"
+              ) : collaboration.state.saving ? (
+                "Synchronized · saving…"
+              ) : (
+                "Synchronized · changes pending"
+              )
+            ) : hasDirty ? (
+              Object.values(s.saving).some(Boolean) ? (
+                "Saving…"
+              ) : (
+                "Changes pending"
+              )
             ) : (
               <>
                 <Check size={13} />
@@ -220,7 +383,7 @@ export function EditorWorkspace({ projectId }: { projectId: string }) {
             variant="outline"
             size="sm"
             onClick={() => void save()}
-            disabled={Object.values(s.saving).some(Boolean)}
+            disabled={readOnly || Object.values(s.saving).some(Boolean)}
           >
             <Save />
             Save
@@ -234,23 +397,32 @@ export function EditorWorkspace({ projectId }: { projectId: string }) {
             <DropdownMenuContent align="end">
               <DropdownMenuItem
                 disabled={!file}
-                onSelect={() =>
-                  file &&
-                  download(
-                    file.path.split("/").pop()!,
-                    file.content,
-                    "text/plain;charset=utf-8",
-                  )
-                }
+                onSelect={() => file && downloadFile(file)}
               >
                 <FileText />
                 Download current file
               </DropdownMenuItem>
               <DropdownMenuItem
+                onSelect={() => {
+                  try {
+                    download(
+                      `${project.name.replace(/[^a-z0-9_-]/gi, "-")}.zip`,
+                      exportProjectZip(project),
+                      "application/zip",
+                    );
+                  } catch (error) {
+                    toast.error((error as Error).message);
+                  }
+                }}
+              >
+                <Download />
+                Download project (ZIP)
+              </DropdownMenuItem>
+              <DropdownMenuItem
                 onSelect={() =>
                   download(
                     `${project.name.replace(/[^a-z0-9_-]/gi, "-")}.json`,
-                    JSON.stringify(project, null, 2),
+                    exportProjectJson(project),
                     "application/json",
                   )
                 }
@@ -262,45 +434,101 @@ export function EditorWorkspace({ projectId }: { projectId: string }) {
           </DropdownMenu>
         </div>
       </header>
+      {s.pendingRecovery.length > 0 && (
+        <div className="workspace-notice" role="status">
+          <span>Recovered drafts are available from your last session.</span>
+          <RecoveredDrafts projectId={projectId} />
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() =>
+              download(
+                "recovered-drafts.json",
+                JSON.stringify(s.pendingRecovery, null, 2),
+                "application/json",
+              )
+            }
+          >
+            Download drafts
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => {
+              if (
+                window.confirm(
+                  "Discard the recovered drafts? This cannot be undone.",
+                )
+              )
+                s.discardRecovery();
+            }}
+          >
+            Discard
+          </Button>
+        </div>
+      )}
+      {readOnly && (
+        <div className="workspace-notice" role="status">
+          You have view access. You can read and download this project.
+        </div>
+      )}
       <div className="editor-body">
         {sidebar && (
           <aside className="file-sidebar">
             <div className="files-heading">
               <span>PROJECT FILES</span>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    variant="ghost"
-                    size="icon-sm"
-                    aria-label="Add file"
-                    onClick={() => setNewFile(true)}
-                  >
-                    <FilePlus2 size={16} />
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent>Add a file</TooltipContent>
-              </Tooltip>
+              <div className="flex items-center">
+                <input
+                  ref={upload}
+                  type="file"
+                  multiple
+                  className="sr-only"
+                  aria-label="Upload project files"
+                  disabled={readOnly || busy}
+                  onChange={(e) => void uploadFiles(e.target.files)}
+                />
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  aria-label="Upload files"
+                  disabled={readOnly || busy}
+                  onClick={() => upload.current?.click()}
+                >
+                  <Upload size={15} />
+                </Button>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      disabled={readOnly || busy}
+                      variant="ghost"
+                      size="icon-sm"
+                      aria-label="Add file"
+                      onClick={() => setNewFile(true)}
+                    >
+                      <FilePlus2 size={16} />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>Add a file</TooltipContent>
+                </Tooltip>
+              </div>
             </div>
             <div className="file-root">
               <ChevronDown size={13} />
               <FolderOpen size={15} />
               <span>{project.name}</span>
             </div>
-            <nav aria-label="Project files" className="file-nav">
-              {project.files.map((item) => (
-                <button
-                  key={item.id}
-                  className={cn("file-item", file?.id === item.id && "active")}
-                  onClick={() => setSelected(item.id)}
-                >
-                  <FileText size={14} />
-                  <span title={item.path}>{item.path}</span>
-                  {s.dirty[item.id] && (
-                    <span className="dirty-dot" aria-label="Unsaved" />
-                  )}
-                </button>
-              ))}
-            </nav>
+            <ProjectFiles
+              files={project.files}
+              selected={file?.id}
+              dirty={s.dirty}
+              readOnly={readOnly}
+              onSelect={setSelected}
+              onAction={(file, kind) => {
+                setAction({ file, kind });
+                setActionPath(file.path);
+                setActionError("");
+              }}
+            />
             <div className="outline-heading">DOCUMENT OUTLINE</div>
             {outline.length ? (
               <ul className="document-outline">
@@ -364,12 +592,150 @@ export function EditorWorkspace({ projectId }: { projectId: string }) {
               <TooltipContent>Line wrapping</TooltipContent>
             </Tooltip>
           </div>
+          {collaborative && collaboration.state.error && (
+            <div className="workspace-notice save-error" role="alert">
+              <span>{collaboration.state.error}</span>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() =>
+                  void collaboration.session
+                    ?.retry()
+                    .catch((e) => toast.error(e.message))
+                }
+              >
+                Retry connection / save
+              </Button>
+              {file && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => downloadFile(file)}
+                >
+                  Download draft
+                </Button>
+              )}
+            </div>
+          )}
+          {file && s.saveErrors[file.id] && (
+            <div className="workspace-notice save-error" role="alert">
+              <span>{s.saveErrors[file.id]}</span>
+              {!hasConflict && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() =>
+                    void s
+                      .saveFile(projectId, file.id)
+                      .catch((e) => toast.error(e.message))
+                  }
+                >
+                  Retry save
+                </Button>
+              )}
+            </div>
+          )}
+          {file && hasConflict && (
+            <div className="workspace-notice save-error">
+              <span>
+                {s.conflicts[file.id]
+                  ? "The account copy changed. Your draft is preserved. Choose which version to keep."
+                  : "The account copy is unavailable. Download your draft before reloading the project."}
+              </span>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => downloadFile(file)}
+              >
+                Download draft
+              </Button>
+              <Button
+                disabled={readOnly || !s.conflicts[file.id]}
+                size="sm"
+                variant="outline"
+                onClick={() => {
+                  if (
+                    window.confirm(
+                      "Replace your local draft with the latest account copy? Your unsaved changes will be discarded.",
+                    )
+                  )
+                    s.acceptRemote(projectId, file.id);
+                }}
+              >
+                Use account copy
+              </Button>
+              <Button
+                disabled={readOnly || !s.conflicts[file.id]}
+                size="sm"
+                onClick={() => {
+                  if (
+                    window.confirm(
+                      "Keep your draft and overwrite the latest account copy?",
+                    )
+                  )
+                    void s
+                      .keepDraft(projectId, file.id)
+                      .catch((e) => toast.error(e.message));
+                }}
+              >
+                Keep my draft
+              </Button>
+            </div>
+          )}
           <div className="code-surface">
-            {file && (
+            {file?.encoding === "base64" ? (
+              <div className="asset-preview">
+                {/^image\/(png|jpeg|gif|webp|avif)$/.test(
+                  file.mimeType ?? "",
+                ) ? (
+                  <Image
+                    unoptimized
+                    width={1200}
+                    height={900}
+                    src={`data:${file.mimeType};base64,${file.content}`}
+                    alt={file.path}
+                  />
+                ) : (
+                  <FileText size={44} strokeWidth={1} />
+                )}
+                <h2>{file.path.split("/").pop()}</h2>
+                <p>
+                  {file.mimeType ?? "Binary asset"} ·{" "}
+                  {Math.round((file.content.length * 3) / 4 / 1024)} KiB
+                </p>
+                <Button variant="outline" onClick={() => downloadFile(file)}>
+                  <Download />
+                  Download asset
+                </Button>
+              </div>
+            ) : file && collaborative ? (
+              collaboration.session && collaboration.state.ready ? (
+                <CollaborativeEditor
+                  key={`${s.accountId}:${file.id}`}
+                  session={collaboration.session}
+                  path={file.path}
+                  wrap={wrap}
+                  readOnly={readOnly}
+                  onCreateEditor={(view) => {
+                    editorView.current = view;
+                    if (pendingLine.current) {
+                      jumpToLine(view, pendingLine.current);
+                      pendingLine.current = null;
+                    }
+                  }}
+                />
+              ) : (
+                <div className="p-6" role="status">
+                  Connecting to the live document…
+                </div>
+              )
+            ) : file ? (
               <CodeMirror
                 key={file.id}
                 value={file.content}
                 height="100%"
+                editable={!readOnly}
+                readOnly={readOnly}
                 theme="light"
                 extensions={[
                   ...(file.path.endsWith(".tex")
@@ -383,10 +749,28 @@ export function EditorWorkspace({ projectId }: { projectId: string }) {
                   highlightActiveLine: true,
                   autocompletion: true,
                 }}
-                onChange={(value) => s.editFile(projectId, file.id, value)}
+                onCreateEditor={(view) => {
+                  editorView.current = view;
+                  if (pendingLine.current) {
+                    jumpToLine(view, pendingLine.current);
+                    pendingLine.current = null;
+                  }
+                }}
+                onChange={(value) => {
+                  if (!readOnly) s.editFile(projectId, file.id, value);
+                }}
                 className={cn("latex-code-editor", wrap && "wrap-code")}
                 aria-label={`Source for ${file.path}`}
               />
+            ) : (
+              <div className="asset-preview">
+                <FilePlus2 size={36} />
+                <h2>A fresh start.</h2>
+                <p>Add a file or upload your source to begin.</p>
+                <Button disabled={readOnly} onClick={() => setNewFile(true)}>
+                  Add file
+                </Button>
+              </div>
             )}
           </div>
           <div className="source-status">
@@ -400,44 +784,26 @@ export function EditorWorkspace({ projectId }: { projectId: string }) {
             </span>
           </div>
         </section>
-        {layout === "split" && (
-          <section className="preview-pane" aria-label="PDF preview">
-            <div className="editor-pane-toolbar">
-              <span className="preview-label">
-                <FileText size={14} /> PDF preview
-              </span>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setCompilerInfo(true)}
-              >
-                <CircleHelp size={14} /> Compiler setup
-              </Button>
-            </div>
-            <div className="preview-empty">
-              <div className="preview-sheet">
-                <div className="preview-sheet-icon">
-                  <FileText size={30} strokeWidth={1.2} />
-                </div>
-                <span className="eyebrow">FROM SOURCE TO SOMETHING</span>
-                <h2>
-                  Your words,
-                  <br />
-                  <em>beautifully set.</em>
-                </h2>
-                <p>
-                  Your compiled PDF will appear here once the LaTeX compiler is
-                  connected.
-                </p>
-                <span className="preview-sheet-rule" />
-                <small>For now, make yourself at home in the editor.</small>
-              </div>
-              <p className="preview-footnote">
-                No PDF has been generated for this project.
-              </p>
-            </div>
-          </section>
-        )}
+        <section
+          className="preview-pane"
+          aria-label="PDF preview"
+          style={{ display: layout === "split" ? undefined : "none" }}
+        >
+          <CompilePanel
+            key={project.id}
+            project={project}
+            onNavigateDiagnostic={(path: string, line?: number) => {
+              const target = project.files.find((f) => f.path === path);
+              if (!target) return;
+              if (file?.id === target.id && editorView.current && line)
+                jumpToLine(editorView.current, line);
+              else {
+                pendingLine.current = line ?? 1;
+                setSelected(target.id);
+              }
+            }}
+          />
+        </section>
       </div>
       <footer className="editor-footer">
         <span>
@@ -447,9 +813,22 @@ export function EditorWorkspace({ projectId }: { projectId: string }) {
               <HardDrive size={12} /> Local workspace · saved in this browser
             </>
           ) : (
-            "Account workspace · save changes with ⌘/Ctrl S"
+            `Account workspace · ${collaboration.state.connected ? (collaboration.state.synchronized ? "live · synchronized" : "connected · synchronizing") : "offline"} · ${Math.max(0, collaboration.state.peers - 1)} collaborators · ⌘/Ctrl S to save now`
           )}
         </span>
+        <Button
+          className="mobile-preview-toggle"
+          variant="ghost"
+          size="xs"
+          onClick={() => {
+            setMobilePreview(!mobilePreview);
+            setLayout("split");
+            setSidebar(false);
+          }}
+        >
+          <LayoutPanelLeft size={13} />
+          {mobilePreview ? "Show source" : "PDF preview"}
+        </Button>
         <Button
           variant="ghost"
           size="xs"
@@ -481,45 +860,76 @@ export function EditorWorkspace({ projectId }: { projectId: string }) {
               required
               maxLength={240}
             />
-            <Button type="submit" disabled={busy}>
+            <Button type="submit" disabled={busy || readOnly}>
               {busy ? <Loader2 className="animate-spin" /> : <FilePlus2 />}
               Create file
             </Button>
           </form>
         </DialogContent>
       </Dialog>
-      <Dialog open={compilerInfo} onOpenChange={setCompilerInfo}>
+      <Dialog
+        open={Boolean(action)}
+        onOpenChange={(open) => {
+          if (!open && !busy) setAction(null);
+        }}
+      >
         <DialogContent>
           <DialogHeader>
-            <span className="dialog-icon">
-              <Sparkles />
-            </span>
-            <DialogTitle className="font-display text-3xl font-normal">
-              The next chapter: compilation.
+            <DialogTitle>
+              {action?.kind === "delete"
+                ? "Delete this file?"
+                : "Rename or move file"}
             </DialogTitle>
             <DialogDescription>
-              The editor is ready for writing. PDF generation will use a
-              separate, sandboxed TeX Live worker connected to Express.
+              {action?.kind === "delete"
+                ? `“${action.file.path}” will be permanently deleted${s.dirty[action.file.id] ? ", including its unsaved changes" : ""}. Download it first if you need a copy.`
+                : "Set the full relative path. Folders are created automatically from file paths; empty folders are not stored."}
             </DialogDescription>
           </DialogHeader>
-          <p className="text-sm leading-relaxed text-muted-foreground">
-            Compilation is deferred for this milestone. You can download a .tex
-            file and compile it with your own LaTeX installation in the
-            meantime.
-          </p>
-          <Button
-            onClick={() => {
-              setCompilerInfo(false);
-              if (file)
-                download(
-                  file.path.split("/").pop()!,
-                  file.content,
-                  "text/plain;charset=utf-8",
-                );
-            }}
-          >
-            Download current file <ArrowUpRight />
-          </Button>
+          <form onSubmit={submitFileAction} className="space-y-4">
+            {action?.kind === "rename" && (
+              <>
+                <label htmlFor="move-file-path" className="text-sm font-medium">
+                  File path
+                </label>
+                <Input
+                  id="move-file-path"
+                  value={actionPath}
+                  onChange={(e) => setActionPath(e.target.value)}
+                  autoFocus
+                  required
+                  maxLength={240}
+                />
+                {s.dirty[action.file.id] && (
+                  <p className="text-sm text-muted-foreground">
+                    Your draft will be saved before this file moves.
+                  </p>
+                )}
+              </>
+            )}
+            {actionError && (
+              <p role="alert" className="text-sm text-destructive">
+                {actionError}
+              </p>
+            )}
+            <div className="flex justify-end gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                disabled={busy}
+                onClick={() => setAction(null)}
+              >
+                Cancel
+              </Button>
+              <Button
+                disabled={busy || readOnly}
+                variant={action?.kind === "delete" ? "destructive" : "default"}
+              >
+                {busy && <Loader2 className="animate-spin" />}
+                {action?.kind === "delete" ? "Delete file" : "Save path"}
+              </Button>
+            </div>
+          </form>
         </DialogContent>
       </Dialog>
     </div>

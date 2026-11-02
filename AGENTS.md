@@ -13,28 +13,30 @@ Guidance for AI coding agents working in this repo.
 - An **MCP server** so Claude, ChatGPT and other AI tools can read and edit the files in a user's account
 - An in-app **AI agent** for two domains: **Resume** and **Research report**
 
-Status: initial application foundation. See README.md for working features, setup, checks, and deferred capabilities.
+Status: local and account workspaces, project archives and assets, account sharing roles and saved text history, and an optional sandboxed compiler. See README.md for working features, setup, checks, and deferred capabilities.
 
 ## Selected stack
 
-| Area                    | Choice                                                              |
-| ----------------------- | ------------------------------------------------------------------- |
-| Language                | TypeScript (monorepo)                                               |
-| Web app                 | Next.js, shadcn/ui, CodeMirror 6; PDF.js when compilation is added  |
-| Auth                    | Better Auth on Express, Google OAuth                                |
-| Real-time collaboration | Yjs + Hocuspocus (WebSocket), with live cursors                     |
-| API and database        | Express + TypeScript, Postgres + Prisma                             |
-| Project state           | Zustand, with browser persistence for the local workspace           |
-| File storage            | S3-compatible storage (R2 / MinIO)                                  |
-| Compile jobs            | Deferred; Express coordinates a separate sandboxed compiler service |
-| Compiler                | TeX Live + `latexmk` (pdfLaTeX / XeLaTeX / LuaLaTeX)                |
-| AI                      | Claude API by default                                               |
+| Area                    | Choice                                                    |
+| ----------------------- | --------------------------------------------------------- |
+| Language                | TypeScript (monorepo)                                     |
+| Web app                 | Next.js, shadcn/ui, CodeMirror 6; PDF.js                  |
+| Auth                    | Better Auth on Express, Google OAuth                      |
+| Real-time collaboration | Yjs + Hocuspocus (WebSocket), with live cursors           |
+| API and database        | Express + TypeScript, Postgres + Prisma                   |
+| Project state           | Zustand, with browser persistence for the local workspace |
+| File storage            | S3-compatible storage (R2 / MinIO)                        |
+| Compile jobs            | Express coordinates a separate sandboxed compiler worker  |
+| Compiler                | TeX Live + `latexmk` (pdfLaTeX / XeLaTeX / LuaLaTeX)      |
+| AI                      | Claude API by default                                     |
 
 ## Compiler rules
 
 - Self-host TeX Live in Docker. Do not depend on public compile APIs.
 - Sandbox every compile: no network, no `--shell-escape`, and limits on CPU, memory and time.
-- Return the PDF, parsed log errors and SyncTeX data.
+- Return the PDF and parsed log errors. SyncTeX is a later milestone.
+- Run the trusted Node worker on the host; only TeX runs inside the restricted container. Never expose the Docker socket to the web/API process.
+- Keep local anonymous compilation opt-in with `ENABLE_LOCAL_COMPILE=true`; authenticate worker requests with matching API/worker tokens.
 - Alternatives considered: Tectonic, SwiftLaTeX / BusyTeX (WebAssembly, possible offline mode later), and Overleaf Community Edition (AGPL, not forked).
 
 ## MCP server (planned)
@@ -44,7 +46,9 @@ A remote MCP server, authenticated with a personal access token first and OAuth 
 `write_file`, `delete_file`, `compile`, `get_compile_errors`, `share_project`.
 Edits go through Yjs, so collaborators see them live. Each tool must check the user's role on the project.
 
-## AI agent (planned)
+## AI agent (paused)
+
+AI assistance is paused at the user’s request. Preserve the unfinished prototypes without activating or developing them.
 
 The agent uses the same tools as the MCP server and shows every edit as a diff for the user to accept or reject.
 
@@ -68,3 +72,7 @@ Who pays for AI (bring-your-own-key, platform limits, or both) · hosting and bu
 - Develop on the assigned feature branch. Never push to `main` directly.
 - Keep changes small. Run lint, typecheck and tests before committing.
 - Never commit secrets. Use `.env` (gitignored) and keep `.env.example` up to date.
+
+## Model preference
+
+Where model selection is available, use GPT-6.1 Sol (`gpt-6.1-sol`) with high reasoning for planning, and medium or low reasoning for implementation.

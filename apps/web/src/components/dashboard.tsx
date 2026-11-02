@@ -26,6 +26,8 @@ import {
   X,
   Pencil,
   HardDrive,
+  Upload,
+  Settings2,
 } from "lucide-react";
 import { toast } from "sonner";
 import { templates, type Project, type TemplateId } from "@latex-free/shared";
@@ -56,9 +58,11 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { ImportProjectDialog } from "./import-project-dialog";
 import { ProjectDialog } from "./project-dialog";
 import { SignInDialog } from "./sign-in-dialog";
 import { PaperThumbnail } from "./paper-thumbnail";
+import { AccessTokens } from "./access-tokens";
 
 function relativeDate(date: string) {
   const seconds = Math.max(0, (Date.now() - new Date(date).getTime()) / 1000);
@@ -74,7 +78,9 @@ export function Dashboard() {
   const s = useWorkspace();
   const { data: session } = authClient.useSession();
   const [create, setCreate] = useState<TemplateId | null>(null);
+  const [importOpen, setImportOpen] = useState(false);
   const [signIn, setSignIn] = useState(false);
+  const [accountSettings, setAccountSettings] = useState(false);
   const [help, setHelp] = useState(false);
   const [mobileMenu, setMobileMenu] = useState(false);
   const [action, setAction] = useState<{
@@ -255,6 +261,15 @@ export function Dashboard() {
             </span>
           </div>
           <div className="flex items-center gap-3">
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              aria-label="Account settings"
+              title="Account settings"
+              onClick={() => setAccountSettings(true)}
+            >
+              <Settings2 size={17} />
+            </Button>
             <Badge variant="outline" className="local-badge">
               <span className="status-dot" />
               {s.mode === "local" ? "Local workspace" : "Connected"}
@@ -296,12 +311,18 @@ export function Dashboard() {
                     : "Your papers, projects, and next possibilities. All in one place."}
               </p>
             </div>
-            <Button
-              className="new-project-button"
-              onClick={() => setCreate("blank")}
-            >
-              <Plus size={17} /> New project
-            </Button>
+            <div className="dashboard-create-actions">
+              <Button variant="outline" onClick={() => setImportOpen(true)}>
+                <Upload size={16} />
+                Import project
+              </Button>
+              <Button
+                className="new-project-button"
+                onClick={() => setCreate("blank")}
+              >
+                <Plus size={17} /> New project
+              </Button>
+            </div>
           </section>
           {s.section !== "starred" && (
             <section
@@ -520,6 +541,7 @@ export function Dashboard() {
                             </DropdownMenuTrigger>
                             <DropdownMenuContent align="end">
                               <DropdownMenuItem
+                                disabled={project.role === "VIEWER"}
                                 onSelect={() => {
                                   setAction({ project, kind: "rename" });
                                   setName(project.name);
@@ -531,6 +553,7 @@ export function Dashboard() {
                               <DropdownMenuSeparator />
                               <DropdownMenuItem
                                 variant="destructive"
+                                disabled={project.role === "VIEWER"}
                                 onSelect={() =>
                                   setAction({ project, kind: "delete" })
                                 }
@@ -627,7 +650,13 @@ export function Dashboard() {
           initialTemplate={create}
         />
       )}
+      <ImportProjectDialog open={importOpen} onOpenChange={setImportOpen} />
       <SignInDialog open={signIn} onOpenChange={setSignIn} />
+      <AccessTokens
+        open={accountSettings}
+        onOpenChange={setAccountSettings}
+        onSignIn={() => setSignIn(true)}
+      />
       <Dialog open={help} onOpenChange={setHelp}>
         <DialogContent>
           <DialogHeader>
@@ -651,13 +680,15 @@ export function Dashboard() {
               <strong className="text-foreground">
                 Your work stays with you.
               </strong>{" "}
-              Local projects are saved in this browser. Use Download source in
-              the editor to keep a backup. Account projects use the Express API.
+              Local projects are saved in this browser. Use Export in the editor
+              to keep a ZIP or JSON backup. Account projects use the Express
+              API.
             </p>
             <p>
               <strong className="text-foreground">Still growing.</strong>{" "}
-              Compilation, live collaboration, MCP, and AI assistance are coming
-              in later milestones.
+              Compile projects with the connected sandboxed TeX Live worker.
+              Live collaboration, MCP, and AI assistance are planned for later
+              milestones.
             </p>
           </div>
           <Button onClick={() => setHelp(false)}>

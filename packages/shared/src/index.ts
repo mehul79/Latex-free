@@ -10,31 +10,151 @@ export const updateProjectSchema = z.object({
   name: z.string().trim().min(1).max(100).optional(),
   starred: z.boolean().optional(),
 });
+export const MAX_FILE_BYTES = 5 * 1024 * 1024;
+export const MAX_TEXT_BYTES = 1_000_000;
+export const MAX_PROJECT_BYTES = 20 * 1024 * 1024;
+export const MAX_PROJECT_FILES = 500;
 export const filePathSchema = z
   .string()
-  .trim()
   .min(1)
   .max(240)
   .refine(
     (path) =>
+      path === path.trim() &&
       !path.startsWith("/") &&
-      !path.split("/").some((part) => part === ".." || part === "." || !part) &&
-      !/[\\\x00-\x1f]/.test(path),
+      !path
+        .split("/")
+        .some(
+          (part) =>
+            part === ".." || part === "." || !part || part !== part.trim(),
+        ) &&
+      !/[\\:\x00-\x1f\x7f]/.test(path),
     "Use a relative file path without traversal",
   );
-export const createFileSchema = z.object({
-  path: filePathSchema,
-  content: z.string().max(1_000_000).default(""),
-});
+export function fileByteLength(file: { content: string; encoding?: string }) {
+  return file.encoding === "base64"
+    ? (file.content.length * 3) / 4 -
+        (file.content.endsWith("==") ? 2 : file.content.endsWith("=") ? 1 : 0)
+    : new TextEncoder().encode(file.content).length;
+}
+export function pathsCollide(a: string, b: string) {
+  return a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
+}
+export const createFileSchema = z
+  .object({
+    path: filePathSchema,
+    content: z
+      .string()
+      .max(Math.ceil(MAX_FILE_BYTES / 3) * 4)
+      .default(""),
+    encoding: z.enum(["utf8", "base64"]).default("utf8"),
+    mimeType: z
+      .string()
+      .max(120)
+      .regex(/^[a-zA-Z0-9!#$&^_.+-]+\/[a-zA-Z0-9!#$&^_.+-]+$/)
+      .nullable()
+      .optional(),
+  })
+  .superRefine((file, ctx) => {
+    if (file.encoding === "base64") {
+      const padding = file.content.endsWith("==")
+        ? 2
+        : file.content.endsWith("=")
+          ? 1
+          : 0;
+      const data = file.content.slice(0, file.content.length - padding);
+      if (
+        file.content.length % 4 !== 0 ||
+        !/^[A-Za-z0-9+/]*$/.test(data) ||
+        (padding === 2 && !/[AQgw]$/.test(data)) ||
+        (padding === 1 && !/[AEIMQUYcgkosw048]$/.test(data))
+      ) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["content"],
+          message: "Invalid base64",
+        });
+      }
+    }
+    if (
+      fileByteLength(file) >
+      (file.encoding === "utf8" ? MAX_TEXT_BYTES : MAX_FILE_BYTES)
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["content"],
+        message: "File exceeds size limit",
+      });
+    }
+  });
 export const updateFileSchema = z.object({
-  content: z.string().max(1_000_000),
-  version: z.number().int().nonnegative(),
+  content: z
+    .string()
+    .max(MAX_TEXT_BYTES)
+    .refine(
+      (content) => new TextEncoder().encode(content).length <= MAX_TEXT_BYTES,
+      "Text exceeds size limit",
+    ),
+  version: z.number().int().min(0).max(2147483646),
 });
+export const renameFileSchema = z.object({
+  path: filePathSchema,
+  version: updateFileSchema.shape.version,
+});
+export const deleteFileSchema = z.object({
+  version: z.coerce.number().int().min(0).max(2147483646),
+});
+export const importProjectSchema = z
+  .object({
+    name: createProjectSchema.shape.name,
+    files: z.array(createFileSchema).min(1).max(MAX_PROJECT_FILES),
+  })
+  .superRefine(({ files }, ctx) => {
+    if (
+      files.reduce((size, file) => size + fileByteLength(file), 0) >
+      MAX_PROJECT_BYTES
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["files"],
+        message: "Project exceeds size limit",
+      });
+    }
+    const paths = new Set<string>();
+    for (const file of files) {
+      if (paths.has(file.path)) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["files"],
+          message: "File paths collide",
+        });
+        break;
+      }
+      paths.add(file.path);
+    }
+    for (const path of paths) {
+      const parts = path.split("/");
+      parts.pop();
+      while (parts.length) {
+        if (paths.has(parts.join("/"))) {
+          ctx.addIssue({
+            code: "custom",
+            path: ["files"],
+            message: "File paths collide",
+          });
+          break;
+        }
+        parts.pop();
+      }
+    }
+  });
 export type ProjectFile = {
   id: string;
   path: string;
   content: string;
   version: number;
+  encoding?: "utf8" | "base64";
+  mimeType?: string | null;
 };
 export type Project = {
   id: string;
@@ -43,6 +163,7 @@ export type Project = {
   starred: boolean;
   updatedAt: string;
   files: ProjectFile[];
+  role?: "OWNER" | "EDITOR" | "VIEWER";
 };
 export type Template = {
   id: TemplateId;
@@ -93,3 +214,113 @@ export function initialFiles(template: TemplateId) {
     },
   ];
 }
+
+export const compileEngines = ["pdflatex", "xelatex", "lualatex"] as const;
+export type CompileEngine = (typeof compileEngines)[number];
+export const compileRequestSchema = z
+  .object({
+    files: z.array(createFileSchema).min(1).max(MAX_PROJECT_FILES),
+    mainFile: filePathSchema.refine(
+      (path) => path.toLowerCase().endsWith(".tex"),
+      "Choose a TeX main file",
+    ),
+    engine: z.enum(compileEngines),
+  })
+  .superRefine((input, ctx) => {
+    const validated = importProjectSchema.safeParse({
+      name: "Compile",
+      files: input.files,
+    });
+    if (!validated.success)
+      for (const issue of validated.error.issues)
+        ctx.addIssue({ ...issue, path: issue.path });
+    if (
+      !input.files.some(
+        (file) => file.path === input.mainFile && file.encoding === "utf8",
+      )
+    )
+      ctx.addIssue({
+        code: "custom",
+        path: ["mainFile"],
+        message: "Main file must be an existing UTF-8 TeX file",
+      });
+  });
+export type CompileRequest = z.input<typeof compileRequestSchema>;
+export type CompileDiagnostic = {
+  severity: "error" | "warning";
+  message: string;
+  file?: string;
+  line?: number;
+};
+export type CompileResult = {
+  status: "succeeded" | "failed";
+  pdfBase64?: string;
+  synctexBase64?: string;
+  log: string;
+  diagnostics: CompileDiagnostic[];
+  durationMs: number;
+};
+export const compileResultSchema = z.object({
+  status: z.enum(["succeeded", "failed"]),
+  pdfBase64: z.string().max(28_000_000).optional(),
+  synctexBase64: z.string().max(28_000_000).optional(),
+  log: z.string().max(2_000_000),
+  diagnostics: z
+    .array(
+      z.object({
+        severity: z.enum(["error", "warning"]),
+        message: z.string().max(10_000),
+        file: z.string().optional(),
+        line: z.number().int().positive().optional(),
+      }),
+    )
+    .max(2000),
+  durationMs: z.number().finite().nonnegative(),
+});
+
+export const memberRoleSchema = z.enum(["EDITOR", "VIEWER"]);
+export const addProjectMemberSchema = z.object({
+  email: z.string().trim().toLowerCase().email().max(320),
+  role: memberRoleSchema,
+});
+export const updateProjectMemberSchema = z.object({ role: memberRoleSchema });
+export const restoreFileRevisionSchema = z.object({
+  expectedVersion: updateFileSchema.shape.version,
+});
+export const revisionsQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+  cursor: z.string().min(1).max(200).optional(),
+});
+export type ProjectMember = {
+  userId: string;
+  name: string;
+  email: string;
+  image: string | null;
+  role: "OWNER" | "EDITOR" | "VIEWER";
+};
+export type FileRevisionMetadata = {
+  id: string;
+  version: number;
+  path: string;
+  createdAt: string;
+  reason:
+    "create" | "baseline" | "edit" | "rename" | "restore" | "collaboration";
+  author: { id: string; name: string } | null;
+};
+export type FileRevision = FileRevisionMetadata & { content: string };
+
+export type CollaborationBarrier = {
+  type: "persistence-barrier";
+  sequence: number;
+};
+export type CollaborationMessage =
+  | { type: "persisted"; sequence: number; version: number }
+  | { type: "document-status"; version: number }
+  | {
+      type: "identity";
+      user: { id: string; name: string };
+      role: "OWNER" | "EDITOR" | "VIEWER";
+      version: number;
+    }
+  | { type: "reload-required"; reason: "membership" | "rename" | "deleted" }
+  | { type: "persistence-error"; error: string };

@@ -4,64 +4,179 @@ import { persist, createJSONStorage } from "zustand/middleware";
 import {
   initialFiles,
   templates,
+  createFileSchema,
+  importProjectSchema,
+  pathsCollide,
   type Project,
   type ProjectFile,
   type TemplateId,
 } from "@latex-free/shared";
 import { api } from "@/lib/api";
+import {
+  closeCleanCollaborations,
+  getCollaboration,
+  type CollaborationState,
+} from "@/lib/collaboration";
 
-type Mode = "local" | "account";
-type Section = "projects" | "starred" | "templates";
+export type ImportFile = Pick<
+  ProjectFile,
+  "path" | "content" | "encoding" | "mimeType"
+>;
+type Draft = {
+  projectId: string;
+  fileId: string;
+  content: string;
+  version: number;
+};
 type Workspace = {
   localProjects: Project[];
   projects: Project[];
-  mode: Mode;
+  mode: "local" | "account";
   accountId: string | null;
   hydrated: boolean;
   loading: boolean;
   error: string | null;
-  section: Section;
+  section: "projects" | "starred" | "templates";
   query: string;
   view: "grid" | "list";
   sort: "updated" | "name";
   dirty: Record<string, boolean>;
   saving: Record<string, boolean>;
+  saveErrors: Record<string, string>;
+  conflicts: Record<string, ProjectFile | null>;
+  pendingRecovery: Draft[];
+  collaborationManaged: Record<string, boolean>;
+  projectCollaboration: (
+    pid: string,
+    fid: string,
+    content: string,
+    state: CollaborationState,
+  ) => void;
+  refreshCollaborationProject: (pid: string) => Promise<void>;
+  recoverCollaborationDraft: (
+    pid: string,
+    fid: string,
+    expectedVersion: number,
+  ) => Promise<void>;
   setHydrated: () => void;
   setFilter: (
     filter: Partial<Pick<Workspace, "section" | "query" | "view" | "sort">>,
   ) => void;
   connect: (userId: string | null) => Promise<void>;
   createProject: (name: string, template: TemplateId) => Promise<string>;
+  importProject: (name: string, files: ImportFile[]) => Promise<string>;
   renameProject: (id: string, name: string) => Promise<void>;
   toggleStar: (id: string) => Promise<void>;
   deleteProject: (id: string) => Promise<void>;
   addFile: (projectId: string, path: string) => Promise<string>;
+  addAsset: (
+    projectId: string,
+    path: string,
+    content: string,
+    encoding?: "utf8" | "base64",
+    mimeType?: string | null,
+  ) => Promise<string>;
+  renameFile: (
+    projectId: string,
+    fileId: string,
+    path: string,
+  ) => Promise<void>;
+  deleteFile: (projectId: string, fileId: string) => Promise<void>;
   editFile: (projectId: string, fileId: string, content: string) => void;
   saveFile: (projectId: string, fileId: string) => Promise<void>;
+  restoreRevision: (
+    projectId: string,
+    fileId: string,
+    revisionId: string,
+  ) => Promise<void>;
+  startAutosave: () => () => void;
+  acceptRemote: (projectId: string, fileId: string) => void;
+  keepDraft: (projectId: string, fileId: string) => Promise<void>;
+  recoverDrafts: () => void;
+  discardRecovery: () => void;
 };
-function newLocalProject(name: string, template: TemplateId): Project {
+function localProject(
+  name: string,
+  template: TemplateId,
+  files = initialFiles(template),
+): Project {
   return {
     id: crypto.randomUUID(),
     name,
     template,
     starred: false,
     updatedAt: new Date().toISOString(),
-    files: initialFiles(template).map((file) => ({
+    files: files.map((file) => ({
       ...file,
       id: crypto.randomUUID(),
       version: 0,
     })),
   };
 }
+const recoveryKey = (account: string) =>
+  `latex-free-account-drafts-v1:${encodeURIComponent(account)}`;
 export const useWorkspace = create<Workspace>()(
   persist(
     (set, get) => {
-      function captureContext() {
-        const { mode, accountId } = get();
-        return () => {
-          if (get().mode !== mode || get().accountId !== accountId)
-            throw new Error("Your workspace changed. Please try again.");
+      let epoch = 0;
+      let autosaveUsers = 0;
+      const timers = new Map<string, ReturnType<typeof setTimeout>>();
+      const operations = new Map<string, Promise<void>>();
+      const file = (pid: string, fid: string) =>
+        get()
+          .projects.find((p) => p.id === pid)
+          ?.files.find((f) => f.id === fid);
+      function context() {
+        const generation = epoch,
+          mode = get().mode,
+          account = get().accountId;
+        const valid = () =>
+          generation === epoch &&
+          mode === get().mode &&
+          account === get().accountId;
+        return {
+          valid,
+          check: () => {
+            if (!valid())
+              throw new Error("Your workspace changed. Please try again.");
+          },
         };
+      }
+      function cancelTimers() {
+        timers.forEach(clearTimeout);
+        timers.clear();
+      }
+      function persistDrafts() {
+        if (
+          get().mode !== "account" ||
+          !get().accountId ||
+          get().loading ||
+          get().error
+        )
+          return;
+        const drafts: Draft[] = [...get().pendingRecovery];
+        for (const project of get().projects)
+          for (const f of project.files)
+            if (get().dirty[f.id]) {
+              const index = drafts.findIndex((d) => d.fileId === f.id);
+              if (index >= 0) drafts.splice(index, 1);
+              drafts.push({
+                projectId: project.id,
+                fileId: f.id,
+                content: f.content,
+                version: f.version,
+              });
+            }
+        try {
+          if (drafts.length)
+            sessionStorage.setItem(
+              recoveryKey(get().accountId!),
+              JSON.stringify(drafts),
+            );
+          else sessionStorage.removeItem(recoveryKey(get().accountId!));
+        } catch {
+          /* Storage may be unavailable or full; the in-memory draft remains. */
+        }
       }
       function replaceProject(project: Project) {
         set((s) => {
@@ -73,6 +188,98 @@ export const useWorkspace = create<Workspace>()(
             ...(s.mode === "local" ? { localProjects: projects } : {}),
           };
         });
+      }
+      function updateFile(
+        pid: string,
+        fid: string,
+        update: (f: ProjectFile) => ProjectFile,
+      ) {
+        const p = get().projects.find((p) => p.id === pid);
+        if (p)
+          replaceProject({
+            ...p,
+            updatedAt: new Date().toISOString(),
+            files: p.files.map((f) => (f.id === fid ? update(f) : f)),
+          });
+      }
+      function addProject(project: Project) {
+        set((s) => {
+          const projects = [project, ...s.projects];
+          return {
+            projects,
+            ...(s.mode === "account"
+              ? {
+                  collaborationManaged: {
+                    ...s.collaborationManaged,
+                    ...Object.fromEntries(
+                      project.files
+                        .filter((f) => f.encoding !== "base64")
+                        .map((f) => [f.id, true]),
+                    ),
+                  },
+                }
+              : {}),
+            section: "projects",
+            query: "",
+            ...(s.mode === "local" ? { localProjects: projects } : {}),
+          };
+        });
+      }
+      function clearStatus(fid: string) {
+        set((s) => {
+          const saveErrors = { ...s.saveErrors },
+            conflicts = { ...s.conflicts };
+          delete saveErrors[fid];
+          delete conflicts[fid];
+          return { saveErrors, conflicts };
+        });
+      }
+      function reportError(fid: string, error: unknown) {
+        const e = error as {
+          message?: string;
+          status?: number;
+          data?: { file?: ProjectFile };
+        };
+        set((s) => ({
+          saveErrors: {
+            ...s.saveErrors,
+            [fid]: e.message ?? "Could not save this file",
+          },
+          ...(e.status === 409
+            ? { conflicts: { ...s.conflicts, [fid]: e.data?.file ?? null } }
+            : {}),
+        }));
+      }
+      function schedule(pid: string, fid: string) {
+        if (
+          !autosaveUsers ||
+          get().mode !== "account" ||
+          !get().dirty[fid] ||
+          get().collaborationManaged[fid] ||
+          fid in get().conflicts ||
+          get().saveErrors[fid]
+        )
+          return;
+        clearTimeout(timers.get(fid));
+        timers.set(
+          fid,
+          setTimeout(() => {
+            timers.delete(fid);
+            void get()
+              .saveFile(pid, fid)
+              .catch(() => {});
+          }, 800),
+        );
+      }
+      async function serialize(fid: string, task: () => Promise<void>) {
+        const previous = operations.get(fid);
+        const pending = previous ? previous.catch(() => {}).then(task) : task();
+        operations.set(fid, pending);
+        try {
+          await pending;
+        } finally {
+          if (operations.get(fid) === pending) operations.delete(fid);
+        }
       }
       return {
         localProjects: [],
@@ -88,193 +295,592 @@ export const useWorkspace = create<Workspace>()(
         sort: "updated",
         dirty: {},
         saving: {},
-        setHydrated: () =>
-          set((s) => ({ hydrated: true, projects: s.localProjects })),
-        setFilter: (filter) => set(filter),
-        connect: async (userId) => {
-          if (!userId) {
-            set((s) => ({
-              mode: "local",
-              accountId: null,
-              projects: s.localProjects,
-              loading: false,
-              error: null,
-              dirty: {},
+        saveErrors: {},
+        conflicts: {},
+        pendingRecovery: [],
+        collaborationManaged: {},
+        projectCollaboration: (pid, fid, content, state) => {
+          if (get().mode !== "account") return;
+          set((s) => ({
+            collaborationManaged: { ...s.collaborationManaged, [fid]: true },
+            dirty: { ...s.dirty, [fid]: state.dirty },
+            saving: { ...s.saving, [fid]: state.saving },
+          }));
+          if (state.ready)
+            updateFile(pid, fid, (f) => ({
+              ...f,
+              content,
+              ...(state.version !== null ? { version: state.version } : {}),
             }));
+          persistDrafts();
+        },
+        refreshCollaborationProject: async (pid) => {
+          const ctx = context();
+          const { projects } = await api<{ projects: Project[] }>("/projects");
+          if (!ctx.valid()) return;
+          const fresh = projects.find((p) => p.id === pid);
+          const current = get().projects.find((p) => p.id === pid);
+          if (!current) return;
+          if (!fresh) {
+            replaceProject({ ...current, role: "VIEWER" });
             return;
           }
+          replaceProject({
+            ...fresh,
+            files: fresh.files.map((f) => {
+              const session =
+                get().accountId &&
+                getCollaboration(get().accountId!, pid, f.id);
+              return session && session.snapshot().ready
+                ? { ...f, content: session.text.toString() }
+                : f;
+            }),
+          });
+        },
+        recoverCollaborationDraft: async (pid, fid, expectedVersion) => {
+          const ctx = context();
+          const draft = get().pendingRecovery.find(
+            (d) => d.projectId === pid && d.fileId === fid,
+          );
+          const project = get().projects.find((p) => p.id === pid);
           if (
+            !draft ||
+            !project ||
+            project.role === "VIEWER" ||
+            get().mode !== "account"
+          )
+            throw new Error("You need edit access to recover this draft.");
+          const session =
+            get().accountId && getCollaboration(get().accountId!, pid, fid);
+          if (
+            session &&
+            (session.snapshot().dirty ||
+              !session.snapshot().synchronized ||
+              session.snapshot().blocked)
+          )
+            throw new Error(
+              "Save or resolve the live document before recovering a draft.",
+            );
+          const { file: recovered } = await api<{ file: ProjectFile }>(
+            `/projects/${pid}/files/${fid}`,
+            {
+              method: "PUT",
+              body: JSON.stringify({
+                content: draft.content,
+                version: expectedVersion,
+              }),
+            },
+          );
+          ctx.check();
+          // The server updates the live Y.Doc. Never insert a JSON recovery draft into it here.
+          if (!session) updateFile(pid, fid, () => recovered);
+          set((s) => ({
+            pendingRecovery: s.pendingRecovery.filter((d) => d !== draft),
+          }));
+          persistDrafts();
+        },
+        setHydrated: () =>
+          set((s) => ({
+            hydrated: true,
+            ...(s.mode === "local" ? { projects: s.localProjects } : {}),
+          })),
+        setFilter: (filter) => set(filter),
+        connect: async (userId) => {
+          if (
+            userId &&
             get().accountId === userId &&
             get().mode === "account" &&
             !get().error
           )
             return;
-          set({
-            loading: true,
-            mode: "account",
+          persistDrafts();
+          closeCleanCollaborations(userId ?? undefined);
+          epoch++;
+          cancelTimers();
+          operations.clear();
+          set((s) => ({
+            mode: userId ? "account" : "local",
             accountId: userId,
-            projects: [],
-            dirty: {},
+            projects: userId ? [] : s.localProjects,
+            loading: !!userId,
             error: null,
-          });
+            dirty: {},
+            saving: {},
+            saveErrors: {},
+            conflicts: {},
+            pendingRecovery: [],
+            collaborationManaged: {},
+          }));
+          if (!userId) return;
+          const ctx = context();
           try {
             const { projects } = await api<{ projects: Project[] }>(
               "/projects",
             );
-            if (get().accountId === userId) set({ projects, loading: false });
+            if (!ctx.valid()) return;
+            let pendingRecovery: Draft[] = [];
+            try {
+              const parsed: unknown = JSON.parse(
+                sessionStorage.getItem(recoveryKey(userId)) ?? "[]",
+              );
+              if (Array.isArray(parsed))
+                pendingRecovery = parsed.filter(
+                  (d): d is Draft =>
+                    d &&
+                    typeof d.projectId === "string" &&
+                    typeof d.fileId === "string" &&
+                    typeof d.content === "string" &&
+                    Number.isInteger(d.version) &&
+                    d.version >= 0,
+                );
+            } catch {
+              /* Recovery is best effort. */
+            }
+            set({
+              projects,
+              loading: false,
+              pendingRecovery,
+              collaborationManaged: Object.fromEntries(
+                projects.flatMap((p) =>
+                  p.files
+                    .filter((f) => f.encoding !== "base64")
+                    .map((f) => [f.id, true]),
+                ),
+              ),
+            });
           } catch (error) {
-            if (get().accountId === userId)
+            if (ctx.valid())
               set({ loading: false, error: (error as Error).message });
           }
         },
         createProject: async (name, template) => {
-          const checkContext = captureContext();
+          const ctx = context();
           const project =
             get().mode === "local"
-              ? newLocalProject(name, template)
+              ? localProject(name, template)
               : (
                   await api<{ project: Project }>("/projects", {
                     method: "POST",
                     body: JSON.stringify({ name, template }),
                   })
                 ).project;
-          checkContext();
-          set((s) => {
-            const projects = [project, ...s.projects];
-            return {
-              projects,
-              section: "projects",
-              query: "",
-              ...(s.mode === "local" ? { localProjects: projects } : {}),
-            };
-          });
+          ctx.check();
+          addProject(project);
+          return project.id;
+        },
+        importProject: async (name, files) => {
+          const input = importProjectSchema.parse({ name, files });
+          const ctx = context();
+          const project =
+            get().mode === "local"
+              ? {
+                  ...localProject(input.name, "blank"),
+                  files: input.files.map((f) => ({
+                    ...f,
+                    id: crypto.randomUUID(),
+                    version: 0,
+                  })),
+                }
+              : (
+                  await api<{ project: Project }>("/projects/import", {
+                    method: "POST",
+                    body: JSON.stringify(input),
+                  })
+                ).project;
+          ctx.check();
+          addProject(project);
           return project.id;
         },
         renameProject: async (id, name) => {
-          const checkContext = captureContext();
-          const project = get().projects.find((p) => p.id === id);
-          if (!project) return;
+          const ctx = context();
+          if (!get().projects.some((p) => p.id === id)) return;
           if (get().mode === "account")
             await api(`/projects/${id}`, {
               method: "PATCH",
               body: JSON.stringify({ name }),
             });
-          checkContext();
-          replaceProject({
-            ...get().projects.find((p) => p.id === id)!,
-            name,
-            updatedAt: new Date().toISOString(),
-          });
+          ctx.check();
+          const current = get().projects.find((p) => p.id === id);
+          if (current)
+            replaceProject({
+              ...current,
+              name,
+              updatedAt: new Date().toISOString(),
+            });
         },
         toggleStar: async (id) => {
-          const checkContext = captureContext();
-          const project = get().projects.find((p) => p.id === id);
-          if (!project) return;
+          const ctx = context(),
+            p = get().projects.find((p) => p.id === id);
+          if (!p) return;
           if (get().mode === "account")
             await api(`/projects/${id}`, {
               method: "PATCH",
-              body: JSON.stringify({ starred: !project.starred }),
+              body: JSON.stringify({ starred: !p.starred }),
             });
-          checkContext();
-          replaceProject({
-            ...get().projects.find((p) => p.id === id)!,
-            starred: !project.starred,
-          });
+          ctx.check();
+          const current = get().projects.find((p) => p.id === id);
+          if (current) replaceProject({ ...current, starred: !p.starred });
         },
         deleteProject: async (id) => {
-          const checkContext = captureContext();
+          const ctx = context();
           if (get().mode === "account")
             await api(`/projects/${id}`, { method: "DELETE" });
-          checkContext();
+          ctx.check();
           set((s) => {
             const projects = s.projects.filter((p) => p.id !== id);
+            const dirty = { ...s.dirty };
+            s.projects
+              .find((p) => p.id === id)
+              ?.files.forEach((f) => {
+                delete dirty[f.id];
+                clearTimeout(timers.get(f.id));
+              });
             return {
               projects,
+              dirty,
+              pendingRecovery: s.pendingRecovery.filter(
+                (d) => d.projectId !== id,
+              ),
               ...(s.mode === "local" ? { localProjects: projects } : {}),
             };
           });
+          persistDrafts();
         },
-        addFile: async (projectId, path) => {
-          const checkContext = captureContext();
-          const project = get().projects.find((p) => p.id === projectId);
-          if (!project) throw new Error("Project not found");
-          if (project.files.some((f) => f.path === path))
-            throw new Error("A file with this name already exists");
-          const file =
+        addFile: (pid, path) => get().addAsset(pid, path, "", "utf8"),
+        addAsset: async (pid, path, content, encoding = "base64", mimeType) => {
+          const input = createFileSchema.parse({
+            path,
+            content,
+            encoding,
+            mimeType,
+          });
+          const ctx = context();
+          const p = get().projects.find((p) => p.id === pid);
+          if (!p) throw new Error("Project not found");
+          if (p.files.some((f) => pathsCollide(f.path, input.path)))
+            throw new Error("A file with this path already exists");
+          importProjectSchema.parse({
+            name: p.name,
+            files: [...p.files, input],
+          });
+          const created =
             get().mode === "local"
-              ? { id: crypto.randomUUID(), path, content: "", version: 0 }
+              ? { ...input, id: crypto.randomUUID(), version: 0 }
               : (
-                  await api<{ file: ProjectFile }>(
-                    `/projects/${projectId}/files`,
-                    { method: "POST", body: JSON.stringify({ path }) },
-                  )
+                  await api<{ file: ProjectFile }>(`/projects/${pid}/files`, {
+                    method: "POST",
+                    body: JSON.stringify(input),
+                  })
                 ).file;
-          checkContext();
-          const current = get().projects.find((p) => p.id === projectId)!;
+          ctx.check();
+          const current = get().projects.find((p) => p.id === pid);
+          if (!current) throw new Error("Project not found");
           replaceProject({
             ...current,
-            files: [...current.files, file],
+            files: [...current.files, created],
             updatedAt: new Date().toISOString(),
           });
-          return file.id;
-        },
-        editFile: (projectId, fileId, content) => {
-          const project = get().projects.find((p) => p.id === projectId);
-          if (!project) return;
-          replaceProject({
-            ...project,
-            updatedAt: new Date().toISOString(),
-            files: project.files.map((f) =>
-              f.id === fileId ? { ...f, content } : f,
-            ),
-          });
-          if (get().mode === "account")
-            set((s) => ({ dirty: { ...s.dirty, [fileId]: true } }));
-        },
-        saveFile: async (projectId, fileId) => {
-          const checkContext = captureContext();
-          const file = get()
-            .projects.find((p) => p.id === projectId)
-            ?.files.find((f) => f.id === fileId);
-          if (
-            !file ||
-            get().mode === "local" ||
-            !get().dirty[fileId] ||
-            get().saving[fileId]
-          )
-            return;
-          set((s) => ({ saving: { ...s.saving, [fileId]: true } }));
-          try {
-            const result = await api<{ file: ProjectFile }>(
-              `/projects/${projectId}/files/${fileId}`,
-              {
-                method: "PUT",
-                body: JSON.stringify({
-                  content: file.content,
-                  version: file.version,
-                }),
+          if (get().mode === "account" && created.encoding !== "base64")
+            set((s) => ({
+              collaborationManaged: {
+                ...s.collaborationManaged,
+                [created.id]: true,
               },
-            );
-            checkContext();
-            const current = get().projects.find((p) => p.id === projectId);
-            if (current) {
-              const currentFile = current.files.find((f) => f.id === fileId)!;
-              replaceProject({
+            }));
+          return created.id;
+        },
+        renameFile: async (pid, fid, path) => {
+          if (get().collaborationManaged[fid]) await get().saveFile(pid, fid);
+          const ctx = context();
+          await serialize(fid, async () => {
+            ctx.check();
+            const f = file(pid, fid);
+            if (!f) throw new Error("File not found");
+            const input = createFileSchema.parse({ ...f, path });
+            if (
+              get()
+                .projects.find((p) => p.id === pid)!
+                .files.some(
+                  (other) =>
+                    other.id !== fid && pathsCollide(other.path, input.path),
+                )
+            )
+              throw new Error("A file with this path already exists");
+            try {
+              const renamed =
+                get().mode === "local"
+                  ? { ...f, path: input.path }
+                  : (
+                      await api<{ file: ProjectFile }>(
+                        `/projects/${pid}/files/${fid}`,
+                        {
+                          method: "PATCH",
+                          body: JSON.stringify({
+                            path: input.path,
+                            version: f.version,
+                          }),
+                        },
+                      )
+                    ).file;
+              ctx.check();
+              updateFile(pid, fid, (current) => ({
                 ...current,
-                files: current.files.map((f) =>
-                  f.id === fileId ? { ...f, version: result.file.version } : f,
-                ),
-              });
-              set((s) => ({
-                dirty: {
-                  ...s.dirty,
-                  [fileId]: currentFile.content !== file.content,
-                },
+                path: renamed.path,
+                version: renamed.version,
               }));
+              clearStatus(fid);
+              persistDrafts();
+            } catch (error) {
+              if (ctx.valid()) reportError(fid, error);
+              throw error;
             }
-          } finally {
-            set((s) => ({ saving: { ...s.saving, [fileId]: false } }));
+          });
+        },
+        deleteFile: async (pid, fid) => {
+          if (get().collaborationManaged[fid]) await get().saveFile(pid, fid);
+          const ctx = context();
+          await serialize(fid, async () => {
+            ctx.check();
+            const f = file(pid, fid);
+            if (!f) return;
+            try {
+              if (get().mode === "account")
+                await api(
+                  `/projects/${pid}/files/${fid}?version=${f.version}`,
+                  { method: "DELETE" },
+                );
+              ctx.check();
+              const current = get().projects.find((p) => p.id === pid);
+              if (current)
+                replaceProject({
+                  ...current,
+                  files: current.files.filter((f) => f.id !== fid),
+                  updatedAt: new Date().toISOString(),
+                });
+              clearTimeout(timers.get(fid));
+              clearStatus(fid);
+              set((s) => ({
+                dirty: { ...s.dirty, [fid]: false },
+                pendingRecovery: s.pendingRecovery.filter(
+                  (d) => d.fileId !== fid,
+                ),
+              }));
+              persistDrafts();
+            } catch (error) {
+              if (ctx.valid()) reportError(fid, error);
+              throw error;
+            }
+          });
+        },
+        editFile: (pid, fid, content) => {
+          if (get().mode === "account" && get().collaborationManaged[fid])
+            return;
+          const f = file(pid, fid);
+          if (!f || f.encoding === "base64" || f.content === content) return;
+          updateFile(pid, fid, (f) => ({ ...f, content }));
+          if (get().mode === "account") {
+            set((s) => ({ dirty: { ...s.dirty, [fid]: true } }));
+            persistDrafts();
+            schedule(pid, fid);
           }
+        },
+        saveFile: async (pid, fid) => {
+          if (get().mode === "account" && get().collaborationManaged[fid]) {
+            const session =
+              get().accountId && getCollaboration(get().accountId!, pid, fid);
+            if (session) {
+              await session.save();
+              return;
+            }
+            if (get().dirty[fid])
+              throw new Error(
+                "Open this live document and synchronize before saving.",
+              );
+            return;
+          }
+          const ctx = context();
+          await serialize(fid, async () => {
+            ctx.check();
+            const f = file(pid, fid);
+            if (!f || get().mode === "local" || !get().dirty[fid]) return;
+            if (fid in get().conflicts)
+              throw new Error("Resolve this file's conflict before saving.");
+            set((s) => ({ saving: { ...s.saving, [fid]: true } }));
+            try {
+              const result = await api<{ file: ProjectFile }>(
+                `/projects/${pid}/files/${fid}`,
+                {
+                  method: "PUT",
+                  body: JSON.stringify({
+                    content: f.content,
+                    version: f.version,
+                  }),
+                },
+              );
+              ctx.check();
+              const current = file(pid, fid);
+              if (current) {
+                updateFile(pid, fid, (f) => ({
+                  ...f,
+                  version: result.file.version,
+                }));
+                set((s) => ({
+                  dirty: { ...s.dirty, [fid]: current.content !== f.content },
+                }));
+                clearStatus(fid);
+                persistDrafts();
+              }
+            } catch (error) {
+              if (ctx.valid()) {
+                reportError(fid, error);
+                persistDrafts();
+              }
+              throw error;
+            } finally {
+              if (ctx.valid()) {
+                set((s) => ({ saving: { ...s.saving, [fid]: false } }));
+                schedule(pid, fid);
+              }
+            }
+          });
+        },
+        restoreRevision: async (pid, fid, rid) => {
+          const ctx = context();
+          const checkRestore = () => {
+            ctx.check();
+            if (get().mode !== "account")
+              throw new Error("Sign in to restore file history.");
+            const project = get().projects.find((p) => p.id === pid);
+            if (!project || project.role === "VIEWER")
+              throw new Error("You need edit access to restore a revision.");
+            if (
+              get().dirty[fid] ||
+              fid in get().conflicts ||
+              get().pendingRecovery.some((draft) => draft.fileId === fid)
+            )
+              throw new Error(
+                "Save or resolve your draft before restoring a revision.",
+              );
+          };
+          checkRestore();
+          if (get().collaborationManaged[fid]) await get().saveFile(pid, fid);
+          await serialize(fid, async () => {
+            checkRestore();
+            const original = file(pid, fid);
+            if (!original || original.encoding === "base64")
+              throw new Error("Text file not found.");
+            clearTimeout(timers.get(fid));
+            set((s) => ({ saving: { ...s.saving, [fid]: true } }));
+            try {
+              const { file: restored } = await api<{ file: ProjectFile }>(
+                `/projects/${pid}/files/${fid}/revisions/${rid}/restore`,
+                {
+                  method: "POST",
+                  body: JSON.stringify({ expectedVersion: original.version }),
+                },
+              );
+              ctx.check();
+              const current = file(pid, fid);
+              if (current) {
+                const edited = !!get().dirty[fid];
+                updateFile(pid, fid, (actual) => ({
+                  ...restored,
+                  ...(edited ? { content: actual.content } : {}),
+                }));
+                set((s) => ({ dirty: { ...s.dirty, [fid]: edited } }));
+                clearStatus(fid);
+                persistDrafts();
+              }
+            } catch (error) {
+              if (ctx.valid()) {
+                reportError(fid, error);
+                persistDrafts();
+              }
+              throw error;
+            } finally {
+              if (ctx.valid()) {
+                set((s) => ({ saving: { ...s.saving, [fid]: false } }));
+                schedule(pid, fid);
+              }
+            }
+          });
+        },
+        startAutosave: () => {
+          autosaveUsers++;
+          for (const p of get().projects)
+            for (const f of p.files) schedule(p.id, f.id);
+          let stopped = false;
+          return () => {
+            if (stopped) return;
+            stopped = true;
+            autosaveUsers = Math.max(0, autosaveUsers - 1);
+            if (!autosaveUsers) cancelTimers();
+          };
+        },
+        acceptRemote: (pid, fid) => {
+          const remote = get().conflicts[fid];
+          if (!remote) return;
+          updateFile(pid, fid, () => remote);
+          set((s) => ({ dirty: { ...s.dirty, [fid]: false } }));
+          clearStatus(fid);
+          persistDrafts();
+        },
+        keepDraft: async (pid, fid) => {
+          const remote = get().conflicts[fid];
+          if (!remote)
+            throw new Error(
+              "The remote file is unavailable. Download your draft before reloading.",
+            );
+          updateFile(pid, fid, (f) => ({
+            ...f,
+            path: remote.path,
+            version: remote.version,
+          }));
+          clearStatus(fid);
+          set((s) => ({ dirty: { ...s.dirty, [fid]: true } }));
+          await get().saveFile(pid, fid);
+        },
+        recoverDrafts: () => {
+          for (const draft of get().pendingRecovery) {
+            const current = file(draft.projectId, draft.fileId);
+            if (
+              !current ||
+              current.encoding === "base64" ||
+              get().collaborationManaged[draft.fileId]
+            )
+              continue;
+            updateFile(draft.projectId, draft.fileId, (f) => ({
+              ...f,
+              content: draft.content,
+            }));
+            set((s) => ({
+              dirty: { ...s.dirty, [draft.fileId]: true },
+              ...(current.version !== draft.version
+                ? {
+                    conflicts: { ...s.conflicts, [draft.fileId]: current },
+                    saveErrors: {
+                      ...s.saveErrors,
+                      [draft.fileId]:
+                        "The account copy changed since this recovered draft.",
+                    },
+                  }
+                : {}),
+            }));
+            schedule(draft.projectId, draft.fileId);
+          }
+          // Retain drafts whose files no longer exist so the UI can still offer their text.
+          set((s) => ({
+            pendingRecovery: s.pendingRecovery.filter(
+              (d) =>
+                !file(d.projectId, d.fileId) ||
+                get().collaborationManaged[d.fileId],
+            ),
+          }));
+          persistDrafts();
+        },
+        discardRecovery: () => {
+          set({ pendingRecovery: [] });
+          persistDrafts();
         },
       };
     },
