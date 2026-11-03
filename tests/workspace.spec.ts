@@ -202,11 +202,11 @@ test("manage nested files and preserve uploaded assets through ZIP and JSON impo
     })
     .click();
   await page
-    .getByRole("menuitem", { name: "Delete file", exact: true })
+    .getByRole("menuitem", { name: "Move to Trash", exact: true })
     .click();
   await page
     .getByRole("dialog")
-    .getByRole("button", { name: "Delete file", exact: true })
+    .getByRole("button", { name: "Move to Trash", exact: true })
     .click();
   await expect(
     page.getByRole("button", { name: "chapters", exact: true }),

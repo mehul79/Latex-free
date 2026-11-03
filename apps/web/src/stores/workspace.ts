@@ -7,6 +7,11 @@ import {
   createFileSchema,
   importProjectSchema,
   pathsCollide,
+  fileByteLength,
+  MAX_PROJECT_FILES,
+  MAX_PROJECT_BYTES,
+  restoreTrashedFileSchema,
+  type TrashedFile,
   type Project,
   type ProjectFile,
   type TemplateId,
@@ -14,6 +19,7 @@ import {
 import { api } from "@/lib/api";
 import {
   closeCleanCollaborations,
+  evictCollaboration,
   getCollaboration,
   type CollaborationState,
 } from "@/lib/collaboration";
@@ -30,6 +36,20 @@ type Draft = {
 };
 type Workspace = {
   localProjects: Project[];
+  localTrash: Record<string, (ProjectFile & { deletedAt: string })[]>;
+  accountTrash: Record<string, TrashedFile[]>;
+  loadTrash: (pid: string) => Promise<void>;
+  restoreTrashedFile: (
+    pid: string,
+    fid: string,
+    version: number,
+    path?: string,
+  ) => Promise<void>;
+  purgeTrashedFile: (
+    pid: string,
+    fid: string,
+    version: number,
+  ) => Promise<void>;
   projects: Project[];
   mode: "local" | "account";
   accountId: string | null;
@@ -178,6 +198,44 @@ export const useWorkspace = create<Workspace>()(
           /* Storage may be unavailable or full; the in-memory draft remains. */
         }
       }
+      function validateStored(
+        pid: string,
+        active: (ProjectFile | ImportFile)[],
+      ) {
+        const stored = [
+          ...active,
+          ...(get().mode === "local" ? (get().localTrash[pid] ?? []) : []),
+        ];
+        if (
+          stored.length > MAX_PROJECT_FILES ||
+          stored.reduce((bytes, file) => bytes + fileByteLength(file), 0) >
+            MAX_PROJECT_BYTES
+        )
+          throw new Error(
+            "Project storage limit includes files in Trash. Permanently delete unneeded trashed files to free space.",
+          );
+      }
+      function evictDeleted(pid: string, f: ProjectFile) {
+        const account = get().accountId;
+        if (!account) return;
+        const session = getCollaboration(account, pid, f.id);
+        if (get().dirty[f.id] || session?.snapshot().dirty) {
+          const draft = {
+            projectId: pid,
+            fileId: f.id,
+            content: session?.text.toString() ?? f.content,
+            version: f.version,
+          };
+          set((s) => ({
+            pendingRecovery: [
+              ...s.pendingRecovery.filter((d) => d.fileId !== f.id),
+              draft,
+            ],
+          }));
+        }
+        evictCollaboration(account, pid, f.id);
+        clearTimeout(timers.get(f.id));
+      }
       function replaceProject(project: Project) {
         set((s) => {
           const projects = s.projects.map((p) =>
@@ -283,6 +341,8 @@ export const useWorkspace = create<Workspace>()(
       }
       return {
         localProjects: [],
+        localTrash: {},
+        accountTrash: {},
         projects: [],
         mode: "local",
         accountId: null,
@@ -325,6 +385,9 @@ export const useWorkspace = create<Workspace>()(
             replaceProject({ ...current, role: "VIEWER" });
             return;
           }
+          for (const previous of current.files)
+            if (!fresh.files.some((f) => f.id === previous.id))
+              evictDeleted(pid, previous);
           replaceProject({
             ...fresh,
             files: fresh.files.map((f) => {
@@ -336,6 +399,7 @@ export const useWorkspace = create<Workspace>()(
                 : f;
             }),
           });
+          persistDrafts();
         },
         recoverCollaborationDraft: async (pid, fid, expectedVersion) => {
           const ctx = context();
@@ -410,6 +474,7 @@ export const useWorkspace = create<Workspace>()(
             conflicts: {},
             pendingRecovery: [],
             collaborationManaged: {},
+            accountTrash: {},
           }));
           if (!userId) return;
           const ctx = context();
@@ -529,6 +594,10 @@ export const useWorkspace = create<Workspace>()(
           set((s) => {
             const projects = s.projects.filter((p) => p.id !== id);
             const dirty = { ...s.dirty };
+            const localTrash = { ...s.localTrash },
+              accountTrash = { ...s.accountTrash };
+            if (s.mode === "local") delete localTrash[id];
+            else delete accountTrash[id];
             s.projects
               .find((p) => p.id === id)
               ?.files.forEach((f) => {
@@ -538,6 +607,8 @@ export const useWorkspace = create<Workspace>()(
             return {
               projects,
               dirty,
+              localTrash,
+              accountTrash,
               pendingRecovery: s.pendingRecovery.filter(
                 (d) => d.projectId !== id,
               ),
@@ -559,10 +630,7 @@ export const useWorkspace = create<Workspace>()(
           if (!p) throw new Error("Project not found");
           if (p.files.some((f) => pathsCollide(f.path, input.path)))
             throw new Error("A file with this path already exists");
-          importProjectSchema.parse({
-            name: p.name,
-            files: [...p.files, input],
-          });
+          validateStored(pid, [...p.files, input]);
           const created =
             get().mode === "local"
               ? { ...input, id: crypto.randomUUID(), version: 0 }
@@ -650,6 +718,21 @@ export const useWorkspace = create<Workspace>()(
                   { method: "DELETE" },
                 );
               ctx.check();
+              if (get().mode === "local")
+                set((s) => ({
+                  localTrash: {
+                    ...s.localTrash,
+                    [pid]: [
+                      ...(s.localTrash[pid] ?? []),
+                      {
+                        ...f,
+                        version: f.version + 1,
+                        deletedAt: new Date().toISOString(),
+                      },
+                    ],
+                  },
+                }));
+              else evictDeleted(pid, f);
               const current = get().projects.find((p) => p.id === pid);
               if (current)
                 replaceProject({
@@ -661,9 +744,6 @@ export const useWorkspace = create<Workspace>()(
               clearStatus(fid);
               set((s) => ({
                 dirty: { ...s.dirty, [fid]: false },
-                pendingRecovery: s.pendingRecovery.filter(
-                  (d) => d.fileId !== fid,
-                ),
               }));
               persistDrafts();
             } catch (error) {
@@ -672,11 +752,121 @@ export const useWorkspace = create<Workspace>()(
             }
           });
         },
+        loadTrash: async (pid) => {
+          if (get().mode === "local") return;
+          const ctx = context();
+          const { files } = await api<{ files: TrashedFile[] }>(
+            `/projects/${pid}/trash`,
+          );
+          ctx.check();
+          set((s) => ({ accountTrash: { ...s.accountTrash, [pid]: files } }));
+        },
+        restoreTrashedFile: async (pid, fid, version, path) => {
+          const ctx = context();
+          const input = restoreTrashedFileSchema.parse({
+            version,
+            path: path || undefined,
+          });
+          const project = get().projects.find((p) => p.id === pid);
+          if (!project) throw new Error("Project not found");
+          let restored: ProjectFile;
+          if (get().mode === "local") {
+            const trashed = get().localTrash[pid]?.find((f) => f.id === fid);
+            if (!trashed || trashed.version !== version)
+              throw new Error("Trash changed. Refresh and try again.");
+            const destination = input.path ?? trashed.path;
+            if (project.files.some((f) => pathsCollide(f.path, destination)))
+              throw new Error(
+                "Restore path collides with an active file. Choose another path.",
+              );
+            const { deletedAt: _deletedAt, ...file } = trashed;
+            void _deletedAt;
+            restored = {
+              ...file,
+              path: destination,
+              version: file.version + 1,
+            };
+            set((s) => ({
+              localTrash: {
+                ...s.localTrash,
+                [pid]: s.localTrash[pid].filter((f) => f.id !== fid),
+              },
+            }));
+          } else {
+            restored = (
+              await api<{ file: ProjectFile }>(
+                `/projects/${pid}/trash/${fid}/restore`,
+                { method: "POST", body: JSON.stringify(input) },
+              )
+            ).file;
+            ctx.check();
+            evictCollaboration(get().accountId!, pid, fid);
+            set((s) => ({
+              accountTrash: {
+                ...s.accountTrash,
+                [pid]: (s.accountTrash[pid] ?? []).filter((f) => f.id !== fid),
+              },
+              collaborationManaged: {
+                ...s.collaborationManaged,
+                [fid]: restored.encoding !== "base64",
+              },
+            }));
+          }
+          const current = get().projects.find((p) => p.id === pid);
+          if (current)
+            replaceProject({
+              ...current,
+              files: [...current.files.filter((f) => f.id !== fid), restored],
+              updatedAt: new Date().toISOString(),
+            });
+          clearStatus(fid);
+        },
+        purgeTrashedFile: async (pid, fid, version) => {
+          const ctx = context();
+          if (get().mode === "local") {
+            const trashed = get().localTrash[pid]?.find((f) => f.id === fid);
+            if (!trashed || trashed.version !== version)
+              throw new Error("Trash changed. Refresh and try again.");
+            set((s) => ({
+              localTrash: {
+                ...s.localTrash,
+                [pid]: s.localTrash[pid].filter((f) => f.id !== fid),
+              },
+            }));
+          } else {
+            await api(`/projects/${pid}/trash/${fid}?version=${version}`, {
+              method: "DELETE",
+            });
+            ctx.check();
+            set((s) => ({
+              accountTrash: {
+                ...s.accountTrash,
+                [pid]: (s.accountTrash[pid] ?? []).filter((f) => f.id !== fid),
+              },
+            }));
+          }
+        },
         editFile: (pid, fid, content) => {
           if (get().mode === "account" && get().collaborationManaged[fid])
             return;
           const f = file(pid, fid);
           if (!f || f.encoding === "base64" || f.content === content) return;
+          if (get().mode === "local") {
+            try {
+              createFileSchema.parse({ ...f, content });
+              validateStored(
+                pid,
+                get()
+                  .projects.find((p) => p.id === pid)!
+                  .files.map((other) =>
+                    other.id === fid ? { ...other, content } : other,
+                  ),
+              );
+            } catch (error) {
+              reportError(fid, error);
+              return;
+            }
+          }
           updateFile(pid, fid, (f) => ({ ...f, content }));
           if (get().mode === "account") {
             set((s) => ({ dirty: { ...s.dirty, [fid]: true } }));
@@ -889,6 +1079,7 @@ export const useWorkspace = create<Workspace>()(
       storage: createJSONStorage(() => localStorage),
       partialize: (s) => ({
         localProjects: s.localProjects,
+        localTrash: s.localTrash,
         view: s.view,
         sort: s.sort,
       }),

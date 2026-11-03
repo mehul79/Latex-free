@@ -307,3 +307,17 @@ export function closeCleanCollaborations(account?: string) {
     }
   }
 }
+
+/** Evict a deleted document after its draft has been copied to workspace recovery. */
+export function evictCollaboration(
+  account: string,
+  project: string,
+  file: string,
+) {
+  const id = key(account, project, file);
+  const session = sessions.get(id);
+  if (!session) return;
+  sessions.delete(id);
+  session.destroy();
+  registryListeners.forEach((listener) => listener());
+}

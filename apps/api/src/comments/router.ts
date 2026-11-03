@@ -76,7 +76,9 @@ export function createCommentsRouter(options: {
     roles: Role[],
   ) => {
     const member = await authorizeProject(tx, projectId, actorId, roles);
-    const file = await tx.file.findFirst({ where: { id: fileId, projectId } });
+    const file = await tx.file.findFirst({
+      where: { id: fileId, projectId, deletedAt: null },
+    });
     if (!file || file.encoding !== "utf8")
       throw new ApiError(404, "Text file not found");
     return { member, file };

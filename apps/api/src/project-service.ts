@@ -6,6 +6,7 @@ import {
   fileByteLength,
   MAX_PROJECT_FILES,
   MAX_PROJECT_BYTES,
+  restoreTrashedFileSchema,
 } from "@latex-free/shared";
 import {
   ApiError,
@@ -13,6 +14,7 @@ import {
   authorizeProject,
   checkVersion,
   snapshot,
+  baseline,
 } from "./document-service.js";
 import { withProject } from "./project-mutex.js";
 
@@ -65,7 +67,7 @@ export class ProjectService {
       this.prisma.$transaction(async (tx) => {
         await authorizeProject(tx, projectId, actorId, [...readers]);
         return tx.file.findMany({
-          where: { projectId },
+          where: { projectId, deletedAt: null },
           select: {
             id: true,
             path: true,
@@ -83,7 +85,7 @@ export class ProjectService {
       this.prisma.$transaction(async (tx) => {
         await authorizeProject(tx, projectId, actorId, [...readers]);
         const file = await tx.file.findFirst({
-          where: { id: fileId, projectId },
+          where: { id: fileId, projectId, deletedAt: null },
         });
         if (!file || file.encoding !== "utf8")
           throw new ApiError(404, "Text file not found");
@@ -97,7 +99,11 @@ export class ProjectService {
       this.prisma.$transaction(async (tx) => {
         await authorizeProject(tx, projectId, actorId, ["OWNER", "EDITOR"]);
         const files = await tx.file.findMany({ where: { projectId } });
-        if (files.some((file) => pathsCollide(file.path, input.path)))
+        if (
+          files.some(
+            (file) => !file.deletedAt && pathsCollide(file.path, input.path),
+          )
+        )
           throw new ApiError(409, "File paths collide");
         if (
           files.length >= MAX_PROJECT_FILES ||
@@ -171,13 +177,102 @@ export class ProjectService {
     fileId: string,
     expectedVersion: number,
   ) {
-    await withProject(projectId, () =>
+    await withProject(projectId, async () => {
+      await this.prisma.$transaction(async (tx) => {
+        await authorizeProject(tx, projectId, actorId, ["OWNER", "EDITOR"]);
+        const file = await tx.file.findFirst({
+          where: { id: fileId, projectId, deletedAt: null },
+        });
+        if (!file) throw new ApiError(404, "File not found");
+        checkVersion(file, expectedVersion);
+        await baseline(tx, file);
+        const trashed = await tx.file.update({
+          where: { id: fileId },
+          data: { deletedAt: new Date(), version: { increment: 1 } },
+        });
+        await snapshot(tx, trashed, actorId, "trash");
+        await tx.project.update({
+          where: { id: projectId },
+          data: { updatedAt: new Date() },
+        });
+      });
+      // Close stale sockets after commit while the shared project queue is still held.
+      this.invalidate?.(projectId, "deleted", fileId);
+    });
+    return { deleted: true };
+  }
+  async listTrash(actorId: string, projectId: string) {
+    return withProject(projectId, () =>
+      this.prisma.$transaction(async (tx) => {
+        await authorizeProject(tx, projectId, actorId, ["OWNER", "EDITOR"]);
+        return tx.file.findMany({
+          where: { projectId, deletedAt: { not: null } },
+          select: {
+            id: true,
+            path: true,
+            version: true,
+            deletedAt: true,
+            encoding: true,
+            mimeType: true,
+          },
+          orderBy: [{ deletedAt: "desc" }, { id: "asc" }],
+          take: MAX_PROJECT_FILES,
+        });
+      }),
+    );
+  }
+  async restoreTrashedFile(
+    actorId: string,
+    projectId: string,
+    fileId: string,
+    raw: unknown,
+  ) {
+    const input = restoreTrashedFileSchema.parse(raw);
+    return withProject(projectId, () =>
       this.prisma.$transaction(async (tx) => {
         await authorizeProject(tx, projectId, actorId, ["OWNER", "EDITOR"]);
         const file = await tx.file.findFirst({
-          where: { id: fileId, projectId },
+          where: { id: fileId, projectId, deletedAt: { not: null } },
         });
-        if (!file) throw new ApiError(404, "File not found");
+        if (!file) throw new ApiError(404, "Trashed file not found");
+        checkVersion(file, input.version);
+        const path = input.path ?? file.path;
+        const active = await tx.file.findMany({
+          where: { projectId, deletedAt: null },
+          select: { path: true },
+        });
+        if (active.some((other) => pathsCollide(other.path, path)))
+          throw new ApiError(
+            409,
+            "Restore path collides with an active file. Choose another path.",
+          );
+        await baseline(tx, file);
+        const restored = await tx.file.update({
+          where: { id: fileId },
+          data: { path, deletedAt: null, version: { increment: 1 } },
+        });
+        await snapshot(tx, restored, actorId, "trash-restore");
+        await tx.project.update({
+          where: { id: projectId },
+          data: { updatedAt: new Date() },
+        });
+        return restored;
+      }),
+    );
+  }
+  async purgeTrashedFile(
+    actorId: string,
+    projectId: string,
+    fileId: string,
+    expectedVersion: number,
+  ) {
+    await withProject(projectId, () =>
+      this.prisma.$transaction(async (tx) => {
+        await authorizeProject(tx, projectId, actorId, ["OWNER"]);
+        const file = await tx.file.findFirst({
+          where: { id: fileId, projectId, deletedAt: { not: null } },
+        });
+        if (!file) throw new ApiError(404, "Trashed file not found");
         checkVersion(file, expectedVersion);
         await tx.file.delete({ where: { id: fileId } });
         await tx.project.update({
@@ -186,8 +281,6 @@ export class ProjectService {
         });
       }),
     );
-    this.invalidate?.(projectId, "deleted", fileId);
-    return { deleted: true };
   }
   async shareProject(actorId: string, projectId: string, raw: unknown) {
     const input = addProjectMemberSchema.parse(raw);
@@ -236,7 +329,7 @@ export class ProjectService {
       this.prisma.$transaction(async (tx) => {
         await authorizeProject(tx, projectId, actorId, [...readers]);
         const files = await tx.file.findMany({
-          where: { projectId },
+          where: { projectId, deletedAt: null },
           orderBy: { path: "asc" },
         });
         return {

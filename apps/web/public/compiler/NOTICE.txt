@@ -1,0 +1,27 @@
+Pinned BusyTeX browser compiler — third-party notices and corresponding source
+
+Unmodified engine/data assets: https://github.com/busytex/busytex/releases/tag/build_wasm_4499aa69fd3cf77ad86a47287d9a5193cf5ad993_7936974349_1
+BusyTeX corresponding source/build scripts (release tag resolves to this commit):
+https://github.com/busytex/busytex/tree/5cfe39684bd88eccc0009e0e50cf4d25753ee347
+https://github.com/busytex/busytex/archive/5cfe39684bd88eccc0009e0e50cf4d25753ee347.tar.gz
+Scripts: MIT, Copyright (c) 2023 Vadim Kantorov. Full notice: BUSYTEX-LICENSE.txt
+The MIT notice applies to BusyTeX's own code/scripts, NOT all linked binaries or TeX files.
+
+The pinned Makefile builds TeX Live 2023, with included libraries (including
+kpathsea, xpdf, Lua, ICU, HarfBuzz, Graphite, TECkit, libpng, FreeType, pplib,
+zlib, zziplib, libpaper), plus Expat and Fontconfig. Each retains its upstream
+license, including GPL/LGPL and permissive terms. Matching source, license
+texts, patches and build recipes are available through the pinned Makefile:
+https://github.com/busytex/busytex/blob/5cfe39684bd88eccc0009e0e50cf4d25753ee347/Makefile
+https://github.com/TeX-Live/texlive-source/tree/tags/texlive-2023.0
+https://github.com/TeX-Live/texlive-source/archive/refs/heads/tags/texlive-2023.0.tar.gz
+https://github.com/libexpat/libexpat/releases/download/R_2_5_0/expat-2.5.0.tar.gz
+https://www.freedesktop.org/software/fontconfig/release/fontconfig-2.13.96.tar.gz
+
+TeX packages/fonts retain their individual licenses (including LPPL, GPL,
+public-domain and font-specific terms). The data pack embeds TeX Live's
+license/readme files and package documentation. Matching TeX Live distribution:
+https://github.com/busytex/busytex/releases/tag/texlive2023-20230313.iso
+https://tug.org/texlive/copying.html
+
+No third-party license here redefines the Latex-free project's license.

@@ -6,7 +6,9 @@
     "dev": "next dev --hostname 0.0.0.0",
     "build": "next build --webpack",
     "start": "next start --hostname 0.0.0.0",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "predev": "node ../../scripts/install-offline-compiler.mjs",
+    "prebuild": "node ../../scripts/install-offline-compiler.mjs"
   },
   "dependencies": {
     "@codemirror/language": "^6.11.3",
@@ -20,6 +22,7 @@
     "clsx": "^2.1.1",
     "fflate": "^0.8.3",
     "lucide-react": "^0.468.0",
+    "motion": "^14.9.0",
     "next": "16.4.3",
     "pdfjs-dist": "^6.4.299",
     "radix-ui": "^1.4.3",

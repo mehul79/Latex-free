@@ -54,6 +54,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { ProjectSharing } from "@/components/project-sharing";
 import { FileComments } from "@/components/file-comments";
+import { FileTrash } from "@/components/file-trash";
 import { FileHistory } from "@/components/file-history";
 import { ProjectFiles } from "@/components/project-files";
 import { CompilePanel } from "@/components/compile-panel";
@@ -233,7 +234,9 @@ export function EditorWorkspace({ projectId }: { projectId: string }) {
       if (action.kind === "delete")
         await s.deleteFile(projectId, action.file.id);
       else await s.renameFile(projectId, action.file.id, actionPath);
-      toast.success(action.kind === "delete" ? "File deleted" : "File moved");
+      toast.success(
+        action.kind === "delete" ? "File moved to Trash" : "File moved",
+      );
       setAction(null);
     } catch (error) {
       setActionError((error as Error).message);
@@ -478,6 +481,7 @@ export function EditorWorkspace({ projectId }: { projectId: string }) {
             <div className="files-heading">
               <span>PROJECT FILES</span>
               <div className="flex items-center">
+                <FileTrash project={project} />
                 <input
                   ref={upload}
                   type="file"
@@ -877,12 +881,12 @@ export function EditorWorkspace({ projectId }: { projectId: string }) {
           <DialogHeader>
             <DialogTitle>
               {action?.kind === "delete"
-                ? "Delete this file?"
+                ? "Move this file to Trash?"
                 : "Rename or move file"}
             </DialogTitle>
             <DialogDescription>
               {action?.kind === "delete"
-                ? `“${action.file.path}” will be permanently deleted${s.dirty[action.file.id] ? ", including its unsaved changes" : ""}. Download it first if you need a copy.`
+                ? `“${action.file.path}” will move to Trash, where you can restore it later. It will still count toward storage limits.`
                 : "Set the full relative path. Folders are created automatically from file paths; empty folders are not stored."}
             </DialogDescription>
           </DialogHeader>
@@ -926,7 +930,7 @@ export function EditorWorkspace({ projectId }: { projectId: string }) {
                 variant={action?.kind === "delete" ? "destructive" : "default"}
               >
                 {busy && <Loader2 className="animate-spin" />}
-                {action?.kind === "delete" ? "Delete file" : "Save path"}
+                {action?.kind === "delete" ? "Move to Trash" : "Save path"}
               </Button>
             </div>
           </form>

@@ -14,6 +14,7 @@ import {
   importProjectSchema,
   renameFileSchema,
   deleteFileSchema,
+  restoreTrashedFileSchema,
   pathsCollide,
   updateProjectMemberSchema,
   restoreFileRevisionSchema,
@@ -203,7 +204,7 @@ export function createApp(
     const projects = await prisma.project.findMany({
       where: { members: { some: { userId: res.locals.userId } } },
       include: {
-        files: { orderBy: { path: "asc" } },
+        files: { where: { deletedAt: null }, orderBy: { path: "asc" } },
         members: {
           where: { userId: res.locals.userId },
           select: { role: true },
@@ -236,7 +237,9 @@ export function createApp(
                   "files" in input ? input.files : initialFiles(input.template),
               },
             },
-            include: { files: { orderBy: { path: "asc" } } },
+            include: {
+              files: { where: { deletedAt: null }, orderBy: { path: "asc" } },
+            },
           });
           for (const file of project.files)
             await snapshot(tx, file, res.locals.userId, "create");
@@ -261,7 +264,7 @@ export function createApp(
           ...(await tx.project.update({
             where: { id: req.params.projectId },
             data,
-            include: { files: true },
+            include: { files: { where: { deletedAt: null } } },
           })),
           role: member.role,
         };
@@ -370,6 +373,36 @@ export function createApp(
     );
     res.status(201).json({ file });
   });
+  app.get("/api/projects/:projectId/trash", async (req, res) => {
+    const files = await projectsDomain.listTrash(
+      res.locals.userId,
+      req.params.projectId,
+    );
+    res.json({ files });
+  });
+  app.post(
+    "/api/projects/:projectId/trash/:fileId/restore",
+    async (req, res) => {
+      const input = restoreTrashedFileSchema.parse(req.body);
+      const file = await projectsDomain.restoreTrashedFile(
+        res.locals.userId,
+        req.params.projectId,
+        req.params.fileId,
+        input,
+      );
+      res.json({ file });
+    },
+  );
+  app.delete("/api/projects/:projectId/trash/:fileId", async (req, res) => {
+    const input = deleteFileSchema.parse(req.query);
+    await projectsDomain.purgeTrashedFile(
+      res.locals.userId,
+      req.params.projectId,
+      req.params.fileId,
+      input.version,
+    );
+    res.status(204).end();
+  });
   const fileRoute = "/api/projects/:projectId/files/:fileId";
   app.put(fileRoute, async (req, res) => {
     const input = updateFileSchema.parse(req.body);
@@ -401,12 +434,16 @@ export function createApp(
         "EDITOR",
       ]);
       const file = await tx.file.findFirst({
-        where: { id: req.params.fileId, projectId: req.params.projectId },
+        where: {
+          id: req.params.fileId,
+          projectId: req.params.projectId,
+          deletedAt: null,
+        },
       });
       if (!file) throw new ApiError(404, "File not found");
       checkVersion(file, input.version);
       const files = await tx.file.findMany({
-        where: { projectId: req.params.projectId },
+        where: { projectId: req.params.projectId, deletedAt: null },
       });
       if (
         files.some(
@@ -450,7 +487,7 @@ export function createApp(
   ) => {
     await readAccess(actorId, projectId);
     const file = await prisma.file.findFirst({
-      where: { id: fileId, projectId },
+      where: { id: fileId, projectId, deletedAt: null },
     });
     if (!file || file.encoding !== "utf8")
       throw new ApiError(404, "Text file not found");
@@ -471,7 +508,11 @@ export function createApp(
         "VIEWER",
       ]);
       const file = await tx.file.findFirst({
-        where: { id: req.params.fileId, projectId: req.params.projectId },
+        where: {
+          id: req.params.fileId,
+          projectId: req.params.projectId,
+          deletedAt: null,
+        },
       });
       if (!file || file.encoding !== "utf8")
         throw new ApiError(404, "Text file not found");

@@ -118,7 +118,7 @@ export class DocumentService {
       this.prisma.$transaction(async (tx) => {
         await authorizeProject(tx, projectId, actorId, ["OWNER", "EDITOR"]);
         const file = await tx.file.findFirst({
-          where: { id: fileId, projectId },
+          where: { id: fileId, projectId, deletedAt: null },
         });
         if (!file) throw new ApiError(404, "File not found");
         checkVersion(file, expectedVersion);

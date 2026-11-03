@@ -83,7 +83,7 @@ export function FileHistory({
             <DialogTitle>File history · {file.path}</DialogTitle>
             <DialogDescription>
               {account
-                ? "Snapshots of saved text versions, including renames. Restoring keeps the current file path. History cannot recover deleted files."
+                ? "Snapshots of saved text versions, including renames. Restoring keeps the current file path. Recover deleted files from File Trash before opening their history."
                 : "Sign in and create or import an account project for saved file history. This local project has no account history. Use Export to download local backups."}
             </DialogDescription>
           </DialogHeader>
@@ -130,7 +130,12 @@ export function FileHistory({
                           }}
                         >
                           <span className="block font-medium">
-                            Version {item.version} · {item.reason}
+                            Version {item.version} ·{" "}
+                            {item.reason === "trash"
+                              ? "Moved to Trash"
+                              : item.reason === "trash-restore"
+                                ? "Restored from Trash"
+                                : item.reason}
                           </span>
                           <span className="block text-xs text-muted-foreground">
                             {new Date(item.createdAt).toLocaleString()} ·{" "}

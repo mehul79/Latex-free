@@ -8,3 +8,6 @@ dist/
 coverage/
 playwright-report/
 test-results/
+
+# Generated pinned offline compiler assets (npm run compiler:assets)
+apps/web/public/compiler/busytex-*/

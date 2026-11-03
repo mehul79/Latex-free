@@ -279,7 +279,7 @@ describe("sharing and immutable text history against real Postgres", () => {
       ).status,
     ).toBe(400);
   });
-  it("creates lazy baselines for legacy text and cascades history on deletion", async () => {
+  it("creates lazy baselines for legacy text, retains Trash history, and cascades only on purge", async () => {
     const legacy = await db.file.create({
       data: {
         projectId: pid,
@@ -309,6 +309,13 @@ describe("sharing and immutable text history against real Postgres", () => {
       { version: 8, reason: "edit", content: "New", authorId: users[0].id },
     ]);
     expect((await call("delete", `${route}?version=8`)).status).toBe(204);
+    expect(await db.fileRevision.count({ where: { fileId: legacy.id } })).toBe(
+      3,
+    );
+    expect(
+      (await call("delete", `${projectRoute()}/trash/${legacy.id}?version=9`))
+        .status,
+    ).toBe(204);
     expect(await db.fileRevision.count({ where: { fileId: legacy.id } })).toBe(
       0,
     );

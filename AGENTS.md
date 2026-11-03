@@ -47,9 +47,9 @@ The paused prototypes are under `apps/api/src/ai`, `apps/api/src/resume`, and `a
 - CodeMirror editing, nested file trees, rename/move/delete, binary assets, outline, source downloads, and ZIP/JSON import/export.
 - Browser-local workspace independent of the API; separate authenticated account workspace with offline drafts, reconnect synchronization, and recovery controls.
 - Live account collaboration and cursors; owner/editor/viewer sharing with existing Google-linked accounts and live access revocation.
-- Immutable saved text revisions, previews/downloads, and restore as a new version at the current path. Deleted files cannot be recovered through history.
+- Immutable saved text revisions, previews/downloads, and restore as a new version at the current path. Deleted files can be recovered through File Trash, preserving identity, history, comments and CRDT state; permanent purge requires the owner.
 - Text-file discussions, replies, resolve/reopen, moderation, and viewer read-only access. The UI creates file discussions and requires manual **Refresh comments** for other members' replies; optional selection anchors exist in the API.
-- Optional compilation with pdfLaTeX, XeLaTeX, or LuaLaTeX; PDF.js preview, parsed logs, and downloadable SyncTeX artifacts. Interactive SyncTeX navigation is deferred.
+- Optional server compilation with pdfLaTeX, XeLaTeX, or LuaLaTeX; PDF.js preview, parsed logs, and downloadable SyncTeX artifacts. Browser pdfLaTeX supports compilation in the current open editor after explicitly preparing a pinned ~137 MB basic TeX Live pack; see `docs/offline-compiler.md` for hosting, limits and licenses. Interactive SyncTeX navigation is deferred.
 - Remote MCP with ten tools: `list_projects`, `list_files`, `read_file`, `create_file`, `edit_file`, `write_file`, `delete_file`, `compile`, `get_compile_errors`, and `share_project`. Account settings provide personal access tokens with permission scopes, project restrictions, expiry, and revocation. Versioned MCP edits reach live collaborators.
 
 Dashboard thumbnails are template illustrations; editor previews render compiled PDFs.
@@ -96,7 +96,7 @@ Use feature branches and PR merges. Never commit or push directly to `main` unle
 
 - The full Google OAuth redirect/consent flow remains unverified; signed-session fixture tests do not cover it. Production deployment and a public preview are not configured.
 - Object storage, durable artifact storage, automated backups, queueing, capacity planning, and multi-process collaboration need future deployment work. Project listing currently loads full content; larger accounts need pagination/on-demand loading.
-- Deleted-file recovery, invitation/notification emails, track changes, Git sync, interactive SyncTeX, and offline WASM compilation are deferred.
+- Invitation/notification emails, track changes, and interactive SyncTeX are deferred.
 - MCP currently uses personal access tokens; OAuth 2.1 sign-in is future work.
-- Kitchen plugins/components are not integrated. Verify their API and license before any use; do not claim their licensing or attribution. Existing shadcn/ui components include their upstream MIT license.
+- The compiler preparation control adapts the Kitchen-catalog DynamicButton from pinned dqnamo/website source under ISC; see `docs/ui-attribution.md`. No Kitchen plugin/tool is installed. Verify API and license before using other catalog components. Existing shadcn/ui components include their separate upstream MIT license.
 - AI prototypes remain paused and unwired. Do not turn this deferred list into implementation work without the user's direction.

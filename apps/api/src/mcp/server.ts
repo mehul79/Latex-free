@@ -78,13 +78,15 @@ export function createMcpServer(options: {
       name,
       {
         description:
-          name === "edit_file"
-            ? "Replace exact literal matches atomically; requires current file version and exact expected match count."
-            : name === "compile"
-              ? "Compile a coherent server-side project snapshot. Returns diagnostics and versions, never a PDF."
-              : name === "share_project"
-                ? "Grant an existing account editor or viewer membership. Requires owner role. Sends no messages."
-                : name.replaceAll("_", " "),
+          name === "delete_file"
+            ? "Move a file to recoverable Trash; requires its current version. Does not permanently delete content."
+            : name === "edit_file"
+              ? "Replace exact literal matches atomically; requires current file version and exact expected match count."
+              : name === "compile"
+                ? "Compile a coherent server-side project snapshot. Returns diagnostics and versions, never a PDF."
+                : name === "share_project"
+                  ? "Grant an existing account editor or viewer membership. Requires owner role. Sends no messages."
+                  : name.replaceAll("_", " "),
         inputSchema: schemas[name],
         annotations: {
           readOnlyHint: [
@@ -283,13 +285,11 @@ export function createMcpRouter(options: {
       await transport.handleRequest(req, res, req.body);
     } catch {
       if (!res.headersSent)
-        res
-          .status(500)
-          .json({
-            jsonrpc: "2.0",
-            id: null,
-            error: { code: -32603, message: "MCP request failed" },
-          });
+        res.status(500).json({
+          jsonrpc: "2.0",
+          id: null,
+          error: { code: -32603, message: "MCP request failed" },
+        });
       await cleanup();
     }
   });
