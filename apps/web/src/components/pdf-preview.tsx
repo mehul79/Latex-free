@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { pdfWorkerSource } from "@/lib/pdf-renderer";
 import type { PDFDocumentProxy } from "pdfjs-dist";
 import {
   ChevronLeft,
@@ -45,10 +46,7 @@ function PdfDocument({ pdfBase64 }: { pdfBase64: string }) {
     void (async () => {
       const pdfjs = await import("pdfjs-dist");
       if (cancelled) return;
-      pdfjs.GlobalWorkerOptions.workerSrc = new URL(
-        "pdfjs-dist/build/pdf.worker.min.mjs",
-        import.meta.url,
-      ).toString();
+      pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerSource();
       const data = Uint8Array.from(atob(pdfBase64), (character) =>
         character.charCodeAt(0),
       );

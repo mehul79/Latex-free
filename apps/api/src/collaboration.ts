@@ -75,7 +75,7 @@ export class CollaborationService {
             where: { userId_projectId: { userId: session.user.id, projectId } },
           });
           const file = await this.prisma.file.findFirst({
-            where: { id: fileId, projectId, encoding: "utf8" },
+            where: { id: fileId, projectId, encoding: "utf8", deletedAt: null },
           });
           if (!member || !file) throw new ApiError(404, "Document not found");
           connectionConfig.readOnly = member.role === "VIEWER";
@@ -96,7 +96,12 @@ export class CollaborationService {
           this.prisma.$transaction(async (tx) => {
             await tx.$queryRaw`SELECT id FROM "Project" WHERE id = ${projectId} FOR UPDATE`;
             const file = await tx.file.findFirst({
-              where: { id: fileId, projectId, encoding: "utf8" },
+              where: {
+                id: fileId,
+                projectId,
+                encoding: "utf8",
+                deletedAt: null,
+              },
             });
             if (!file) throw new ApiError(404, "Document not found");
             document.getText("source");
@@ -300,7 +305,7 @@ export class CollaborationService {
       where: { userId_projectId: { userId: context.actorId, projectId } },
     });
     const file = await this.prisma.file.findFirst({
-      where: { id: fileId, projectId, encoding: "utf8" },
+      where: { id: fileId, projectId, encoding: "utf8", deletedAt: null },
       select: { id: true },
     });
     if (
@@ -352,7 +357,7 @@ export class CollaborationService {
           throw new ApiError(401, "Session expired");
       }
       const file = await tx.file.findFirst({
-        where: { id: fileId, projectId },
+        where: { id: fileId, projectId, deletedAt: null },
       });
       if (!file || file.encoding !== "utf8")
         throw new ApiError(404, "Text file not found");

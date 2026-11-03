@@ -88,7 +88,7 @@ export function ProjectFiles(props: Props) {
                   onSelect={() => props.onAction(file, "delete")}
                 >
                   <Trash2 />
-                  Delete file
+                  Move to Trash
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>

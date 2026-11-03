@@ -101,6 +101,15 @@ export const renameFileSchema = z.object({
   path: filePathSchema,
   version: updateFileSchema.shape.version,
 });
+export const restoreTrashedFileSchema = z.object({
+  version: updateFileSchema.shape.version,
+  path: filePathSchema.optional(),
+});
+export type TrashedFile = Pick<
+  ProjectFile,
+  "id" | "path" | "version" | "encoding" | "mimeType"
+> & { deletedAt: string };
+
 export const deleteFileSchema = z.object({
   version: z.coerce.number().int().min(0).max(2147483646),
 });
@@ -304,7 +313,14 @@ export type FileRevisionMetadata = {
   path: string;
   createdAt: string;
   reason:
-    "create" | "baseline" | "edit" | "rename" | "restore" | "collaboration";
+    | "create"
+    | "baseline"
+    | "edit"
+    | "rename"
+    | "restore"
+    | "collaboration"
+    | "trash"
+    | "trash-restore";
   author: { id: string; name: string } | null;
 };
 export type FileRevision = FileRevisionMetadata & { content: string };

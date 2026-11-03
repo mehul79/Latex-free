@@ -18,7 +18,8 @@
     "db:migrate": "npm run db:migrate -w @latex-free/api",
     "test:e2e": "playwright test",
     "test:integration": "npm run build -w @latex-free/shared && npm run test:integration -w @latex-free/api",
-    "dev:compiler": "npm run dev -w @latex-free/compiler"
+    "dev:compiler": "npm run dev -w @latex-free/compiler",
+    "compiler:assets": "node scripts/install-offline-compiler.mjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.56.0",

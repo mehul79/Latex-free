@@ -17,7 +17,7 @@ An open LaTeX workspace, built with Next.js, Express, PostgreSQL, Prisma, Better
 - Account text-file discussions with replies, resolve/reopen, author or owner moderation, viewer read-only access, and bounded pagination. Use Refresh comments to see other members’ replies. Optional selection anchors are supported by the API; the current UI creates file discussions.
 - Personal access tokens created and revoked in Account settings. Tokens restrict MCP tools by project, permission, and expiration; versioned MCP edits reach live collaborators.
 
-AI assistance is paused at the user’s request; its prototypes remain unfinished and are not active. Invitation emails and interactive SyncTeX navigation are not implemented. Compiler SyncTeX artifacts are available for download. History cannot recover deleted files. Dashboard thumbnail pages are template illustrations; the editor preview renders compiled PDFs.
+AI assistance is paused at the user’s request; its prototypes remain unfinished and are not active. Invitation emails and interactive SyncTeX navigation are not implemented. Compiler SyncTeX artifacts are available for download. Deleted text and binary files can be restored from [File Trash](docs/file-trash.md), including their account history and discussions; owners can permanently purge trashed files. Dashboard thumbnail pages are template illustrations; the editor preview renders compiled PDFs.
 
 ## Local development
 
@@ -60,6 +60,10 @@ Create a Google OAuth web client and configure:
 Restart Express after changing credentials. No passwords or development login bypasses are enabled. Without Google configuration, the UI explains that sign-in is unavailable and the local workspace still works. API health and provider availability are exposed at `/api/health` and `/api/config`.
 
 Local projects and account projects are separate; signing in does not upload local documents. Local drafts persist automatically. Account drafts save automatically after a short idle period; Save or Ctrl/Cmd+S also flushes changes. Recovery drafts remain in this browser until a save succeeds or you explicitly discard them. The editor warns before closing a tab with unsaved account changes. Version conflicts reject the save rather than overwrite a newer version; download your draft before reloading to resolve a conflict.
+
+### Browser offline compiler
+
+The editor can prepare a pinned browser pdfLaTeX engine (~137 MB) and compile current files without the API or network while the editor stays open. See [browser compilation setup, limits and licenses](docs/offline-compiler.md). Its preparation button adapts the ISC-licensed DynamicButton; see [UI attribution](docs/ui-attribution.md). Web development/build scripts install and verify the generated engine assets automatically.
 
 ### Optional local compiler
 
@@ -123,7 +127,7 @@ packages/shared  Input schemas, API types, LaTeX templates
 
 Zustand owns project data and draft updates. Better Auth owns authentication/session state. Transient component state (dialogs and form fields) stays in React. Only local projects are persisted to browser storage; account projects are not mixed into the local workspace.
 
-The UI components in `apps/web/src/components/ui` come from the official shadcn/ui new-york-v4 registry; the upstream MIT license is included. Kitchen components have not been integrated; their API and license still require verification. No components are attributed to Kitchen.
+The existing shadcn/ui components in `apps/web/src/components/ui` come from the official new-york-v4 registry and retain the included upstream MIT license. The offline preparation control adapts DynamicButton from the Kitchen catalog’s linked dqnamo/website source under ISC; its pinned provenance and separate license notice are documented in [UI attribution](docs/ui-attribution.md).
 
 ## Operational scope
 

@@ -10,8 +10,15 @@ import {
   Loader2,
   Play,
 } from "lucide-react";
+import {
+  clearOfflineCompiler,
+  compileOffline,
+  offlineCompilerReady,
+  prepareOfflineCompiler,
+} from "@/lib/offline-compiler";
 import { api } from "@/lib/api";
 import { useWorkspace } from "@/stores/workspace";
+import { DynamicButton } from "@/components/ui/dynamic-button";
 import { Button } from "@/components/ui/button";
 import { PdfPreview } from "@/components/pdf-preview";
 
@@ -41,6 +48,12 @@ export function CompilePanel({
   onNavigateDiagnostic?: (path: string, line?: number) => void;
 }) {
   const mode = useWorkspace((state) => state.mode);
+  const [source, setSource] = useState<"server" | "browser">("server");
+  const [prepared, setPrepared] = useState(false);
+  const [preparing, setPreparing] = useState(false);
+  const [preparationFailed, setPreparationFailed] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const preparation = useRef<AbortController | null>(null);
   const [config, setConfig] = useState<CompilerConfig | null>(null);
   const [configError, setConfigError] = useState(false);
   const texFiles = project.files.filter(
@@ -70,12 +83,16 @@ export function CompilePanel({
           encoding: encoding ?? "utf8",
         })),
         mainFile,
-        engine,
+        engine: source === "browser" ? "pdflatex" : engine,
+        source,
       }),
-    [project.files, mainFile, engine],
+    [project.files, mainFile, engine, source],
   );
 
   useEffect(() => {
+    void offlineCompilerReady()
+      .then(setPrepared)
+      .catch(() => setPrepared(false));
     const controller = new AbortController();
     void api<CompilerConfig>("/config", { signal: controller.signal })
       .then(setConfig)
@@ -85,12 +102,42 @@ export function CompilePanel({
     return () => {
       controller.abort();
       request.current?.abort();
+      preparation.current?.abort();
     };
   }, []);
 
   const allowed =
-    !!config?.compilerEnabled &&
-    (mode === "account" || !!config.localCompileEnabled);
+    source === "browser"
+      ? prepared
+      : !!config?.compilerEnabled &&
+        (mode === "account" || !!config.localCompileEnabled);
+
+  async function prepare() {
+    const controller = new AbortController();
+    preparation.current = controller;
+    setPreparing(true);
+    setPreparationFailed(false);
+    setRequestError(null);
+    setProgress(0);
+    try {
+      await prepareOfflineCompiler(controller.signal, (received, total) =>
+        setProgress(Math.round((received / total) * 100)),
+      );
+      if (!controller.signal.aborted) setPrepared(true);
+    } catch (error) {
+      setPrepared(false);
+      if (!controller.signal.aborted) {
+        setPreparationFailed(true);
+        setRequestError(
+          error instanceof Error
+            ? error.message
+            : "Compiler preparation failed.",
+        );
+      }
+    } finally {
+      setPreparing(false);
+    }
+  }
   const stale = !!pdf && pdf.snapshot !== snapshot;
   const previous =
     !!pdf && (output?.result.status === "failed" || !!requestError);
@@ -104,11 +151,14 @@ export function CompilePanel({
     setBusy(true);
     setRequestError(null);
     try {
-      const result = await api<CompileResult>("/compile", {
-        method: "POST",
-        body: submitted,
-        signal: controller.signal,
-      });
+      const result =
+        source === "browser"
+          ? await compileOffline(JSON.parse(submitted), controller.signal)
+          : await api<CompileResult>("/compile", {
+              method: "POST",
+              body: submitted,
+              signal: controller.signal,
+            });
       if (controller.signal.aborted) return;
       const next = { result, snapshot: submitted };
       setOutput(next);
@@ -141,8 +191,35 @@ export function CompilePanel({
           {busy ? <Loader2 className="animate-spin" /> : <Play size={14} />}
           {busy ? "Compiling…" : "Compile"}
         </Button>
+        {busy && (
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => {
+              request.current?.abort();
+              setBusy(false);
+            }}
+          >
+            Cancel compile
+          </Button>
+        )}
       </div>
       <div className="flex flex-wrap items-center gap-3 border-b bg-background px-3 py-2 text-xs">
+        <label className="flex items-center gap-2">
+          Compiler
+          <select
+            aria-label="Compiler source"
+            className="rounded-md border bg-background p-1.5"
+            value={source}
+            disabled={busy || preparing}
+            onChange={(event) =>
+              setSource(event.target.value as "server" | "browser")
+            }
+          >
+            <option value="server">Server</option>
+            <option value="browser">Browser (offline pdfLaTeX)</option>
+          </select>
+        </label>
         <label className="flex min-w-0 flex-1 items-center gap-2">
           Main file
           <select
@@ -165,9 +242,9 @@ export function CompilePanel({
           <select
             aria-label="LaTeX engine"
             className="rounded-md border bg-background px-2 py-1.5 text-xs"
-            value={engine}
+            value={source === "browser" ? "pdflatex" : engine}
             onChange={(event) => setEngine(event.target.value as CompileEngine)}
-            disabled={busy}
+            disabled={busy || source === "browser"}
           >
             <option value="pdflatex">pdfLaTeX</option>
             <option value="xelatex">XeLaTeX</option>
@@ -175,7 +252,97 @@ export function CompilePanel({
           </select>
         </label>
       </div>
-      {!allowed && (
+      {source === "browser" && (
+        <div className="border-b px-3 py-2 text-xs space-y-2">
+          <p>
+            Browser pdfLaTeX uses a basic TeX Live pack, including geometry,
+            hyperref, amsmath and BibTeX. Extra packages, XeLaTeX, LuaLaTeX and
+            Biber are unavailable; there is no network fallback. Keep this
+            editor open for offline use. Account sign-in and app reload still
+            need a connection.
+          </p>
+          <p>
+            <a
+              className="underline"
+              href="/compiler/NOTICE.txt"
+              target="_blank"
+              rel="noreferrer"
+            >
+              Compiler licenses and corresponding source
+            </a>
+          </p>
+          <DynamicButton
+            size="sm"
+            variant="outline"
+            disabled={preparing || prepared}
+            aria-busy={preparing}
+            stateKey={
+              prepared
+                ? "ready"
+                : preparing
+                  ? "preparing"
+                  : preparationFailed
+                    ? "failed"
+                    : "idle"
+            }
+            icon={
+              prepared ? (
+                <CheckCircle2 size={14} />
+              ) : preparing ? (
+                <Loader2 size={14} className="motion-safe:animate-spin" />
+              ) : (
+                <Download size={14} />
+              )
+            }
+            onClick={() => void prepare()}
+          >
+            {prepared
+              ? "Offline compiler ready"
+              : preparing
+                ? `Preparing compiler ${progress}%`
+                : preparationFailed
+                  ? "Retry preparation"
+                  : "Prepare offline compiler (~137 MB)"}
+          </DynamicButton>
+          {prepared ? (
+            <>
+              <p role="status">
+                Offline compiler ready · stored in this browser
+              </p>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={busy}
+                onClick={() => {
+                  void clearOfflineCompiler().then(() => {
+                    setPrepared(false);
+                    setPreparationFailed(false);
+                  });
+                }}
+              >
+                Clear compiler cache
+              </Button>
+            </>
+          ) : preparing ? (
+            <>
+              <p role="status">Preparing offline compiler… {progress}%</p>
+              <progress
+                aria-label="Compiler download progress"
+                value={progress}
+                max={100}
+              />
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => preparation.current?.abort()}
+              >
+                Cancel preparation
+              </Button>
+            </>
+          ) : null}
+        </div>
+      )}
+      {source === "server" && !allowed && (
         <p
           className="border-b bg-muted/40 px-4 py-3 text-xs leading-relaxed text-muted-foreground"
           role="status"
